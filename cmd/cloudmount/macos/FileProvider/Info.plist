@@ -8,6 +8,8 @@
 <key>CFBundleShortVersionString</key><string>1.0</string>
 <key>CFBundleVersion</key><string>1</string>
 <key>CloudMountMachService</key><string>$(CLOUDMOUNT_MACH_SERVICE)</string>
+<key>CloudMountTeamIdentifier</key><string>$(CLOUDMOUNT_TEAM_ID)</string>
+<key>CloudMountAgentIdentifier</key><string>$(CLOUDMOUNT_AGENT_LABEL)</string>
 <key>NSExtension</key><dict>
   <key>NSExtensionPointIdentifier</key><string>com.apple.fileprovider-nonui</string>
   <key>NSExtensionPrincipalClass</key><string>$(PRODUCT_MODULE_NAME).FileProviderExtension</string>

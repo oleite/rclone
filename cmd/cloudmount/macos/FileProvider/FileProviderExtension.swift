@@ -4,6 +4,22 @@ import os
 
 private let logger = Logger(subsystem: "org.rclone.cloudmount", category: "file-provider")
 
+private final class OneShotCompletion {
+    private let lock = NSLock()
+    private var completed = false
+
+    func run(_ action: () -> Void) {
+        lock.lock()
+        guard !completed else {
+            lock.unlock()
+            return
+        }
+        completed = true
+        lock.unlock()
+        action()
+    }
+}
+
 final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     private let domain: NSFileProviderDomain
 
@@ -44,21 +60,21 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             let manager = NSFileProviderManager(for: domain)!
             let destination = try manager.temporaryDirectoryURL().appendingPathComponent(UUID().uuidString)
             let connection = CloudMountXPC.connection()
-            var completed = false
+            let completion = OneShotCompletion()
             let finish: (Error?) -> Void = { error in
-                guard !completed else { return }
-                completed = true
-                connection.invalidate()
-                if let error {
-                    completionHandler(nil, nil, error)
-                } else {
-                    logger.notice("agent completed synthetic item \(itemIdentifier.rawValue, privacy: .public)")
-                    progress.completedUnitCount = 1
-                    completionHandler(destination, FileProviderItem(identifier: itemIdentifier), nil)
+                completion.run {
+                    connection.invalidate()
+                    if let error {
+                        completionHandler(nil, nil, error)
+                    } else {
+                        logger.notice("agent completed synthetic item \(itemIdentifier.rawValue, privacy: .public)")
+                        progress.completedUnitCount = 1
+                        completionHandler(destination, FileProviderItem(identifier: itemIdentifier), nil)
+                    }
                 }
             }
             connection.interruptionHandler = { finish(NSFileProviderError(.serverUnreachable)) }
-            connection.invalidationHandler = { if !completed { finish(NSFileProviderError(.serverUnreachable)) } }
+            connection.invalidationHandler = { finish(NSFileProviderError(.serverUnreachable)) }
             progress.cancellationHandler = { finish(CocoaError(.userCancelled)) }
             connection.resume()
             let proxy = connection.remoteObjectProxyWithErrorHandler { finish($0) } as? CloudMountAgentProtocol
