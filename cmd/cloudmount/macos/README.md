@@ -6,8 +6,14 @@ CloudMount. It does not contain the rclone engine and is not part of normal Go b
 ## Local configuration
 
 Copy `Config/Local.xcconfig.example` to `Config/Local.xcconfig`, then set an Apple
-development team, a unique bundle identifier, and an App Group owned by that team.
+development team, a unique bundle identifier, and the App Group suffix.
 The local file is ignored by git. The macOS deployment target is 13.0.
+
+CloudMount uses the macOS Team-ID App Group form
+`<Developer-Team-ID>.org.rclone.cloudmount`, not a registered `group.*` App Group.
+The committed unsigned-build placeholder is `TEAMID`; `Local.xcconfig` maps
+`CLOUDMOUNT_TEAM_ID` to `DEVELOPMENT_TEAM`. The Mach service appends `.agent` to
+the resulting App Group identifier.
 
 Build the `RcloneCloudMount` scheme in Debug with automatic signing. For stable
 runtime registration, copy the result to `~/Applications/RcloneCloudMount.app`
