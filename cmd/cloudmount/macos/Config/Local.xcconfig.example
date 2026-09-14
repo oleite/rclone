@@ -1,0 +1,5 @@
+// Copy this file to Local.xcconfig and fill in values for local development.
+// Local.xcconfig is intentionally ignored by git.
+DEVELOPMENT_TEAM = YOUR_TEAM_ID
+CLOUDMOUNT_BUNDLE_ID = org.example.rclone.cloudmount
+CLOUDMOUNT_APP_GROUP = group.org.example.rclone.cloudmount
