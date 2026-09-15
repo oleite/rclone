@@ -1,10 +1,13 @@
 import Foundation
 
-@objc protocol CloudMountAgentProtocol {
+@objc protocol CloudMountControlProtocol {
     func ping(reply: @escaping (String) -> Void)
     func configureDomain(domainIdentifier: String, remote: String, reply: @escaping (NSError?) -> Void)
     func removeDomainConfiguration(domainIdentifier: String, reply: @escaping (NSError?) -> Void)
     func domainConfigurationStatus(domainIdentifier: String, reply: @escaping (Bool, NSError?) -> Void)
+}
+
+@objc protocol CloudMountDataProtocol {
     func listDirectory(domainIdentifier: String, path: String, reply: @escaping (String?, NSError?) -> Void)
     func statItem(domainIdentifier: String, path: String, isDirectory: Bool, reply: @escaping (String?, NSError?) -> Void)
     func fetchContents(
@@ -28,8 +31,12 @@ enum CloudMountConstants {
     static let domainIdentifier = "org.rclone.cloudmount.test"
     static let domainDisplayName = "Rclone CloudMount Test"
 
-    static var machServiceName: String {
-        infoString("CloudMountMachService")
+    static var controlMachServiceName: String {
+        infoString("CloudMountControlMachService")
+    }
+
+    static var dataMachServiceName: String {
+        infoString("CloudMountDataMachService")
     }
 
     static var agentCodeSigningRequirement: String {
@@ -53,14 +60,27 @@ enum CloudMountConstants {
 }
 
 enum CloudMountXPC {
-    static func connection() -> NSXPCConnection {
+    static func controlConnection() -> NSXPCConnection {
+        makeConnection(
+            machServiceName: CloudMountConstants.controlMachServiceName,
+            protocol: CloudMountControlProtocol.self
+        )
+    }
+
+    static func dataConnection() -> NSXPCConnection {
+        makeConnection(
+            machServiceName: CloudMountConstants.dataMachServiceName,
+            protocol: CloudMountDataProtocol.self
+        )
+    }
+
+    private static func makeConnection(machServiceName: String, protocol: Protocol) -> NSXPCConnection {
         let connection = NSXPCConnection(
-            machServiceName: CloudMountConstants.machServiceName,
+            machServiceName: machServiceName,
             options: []
         )
         connection.setCodeSigningRequirement(CloudMountConstants.agentCodeSigningRequirement)
-        let interface = NSXPCInterface(with: CloudMountAgentProtocol.self)
-        connection.remoteObjectInterface = interface
+        connection.remoteObjectInterface = NSXPCInterface(with: `protocol`)
         return connection
     }
 }

@@ -59,6 +59,11 @@ The LaunchAgent persists its versioned mapping in
 mode `0700`, the file is mode `0600`, and updates are atomic. Removing the test
 domain removes the File Provider domain first and its Agent mapping second.
 
+The Agent exposes two mutually authenticated Mach services in the same process.
+The containing app alone can use the control service for ping and domain mapping;
+the File Provider alone can use the data service for List, Stat, and Fetch. Each
+listener enforces the exact same-team client identifier for its role.
+
 The read-only data path is direct:
 
 ```text

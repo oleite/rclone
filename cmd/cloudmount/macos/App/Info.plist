@@ -8,7 +8,7 @@
 <key>CFBundleShortVersionString</key><string>1.0</string>
 <key>CFBundleVersion</key><string>1</string>
 <key>LSBackgroundOnly</key><true/>
-<key>CloudMountMachService</key><string>$(CLOUDMOUNT_MACH_SERVICE)</string>
+<key>CloudMountControlMachService</key><string>$(CLOUDMOUNT_CONTROL_MACH_SERVICE)</string>
 <key>CloudMountTeamIdentifier</key><string>$(CLOUDMOUNT_TEAM_ID)</string>
 <key>CloudMountAgentIdentifier</key><string>$(CLOUDMOUNT_AGENT_LABEL)</string>
 <key>CloudMountAgentPlistName</key><string>$(CLOUDMOUNT_AGENT_LABEL).plist</string>

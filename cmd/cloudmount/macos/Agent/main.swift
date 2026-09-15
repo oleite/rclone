@@ -21,23 +21,41 @@ private func requirementString(_ value: String) -> String {
     return "\"\(escaped)\""
 }
 
-private let peerCodeSigningRequirement: String = {
+private let controlPeerCodeSigningRequirement: String = {
     let teamID = requirementString(infoString("CloudMountTeamIdentifier"))
     let appID = requirementString(infoString("CloudMountAppBundleIdentifier"))
-    let providerID = requirementString(infoString("CloudMountFileProviderBundleIdentifier"))
-    return "anchor apple generic and certificate leaf[subject.OU] = \(teamID) and (identifier \(appID) or identifier \(providerID))"
+    return "anchor apple generic and certificate leaf[subject.OU] = \(teamID) and identifier \(appID)"
 }()
 
-private final class AgentService: NSObject, CloudMountAgentProtocol {
+private let dataPeerCodeSigningRequirement: String = {
+    let teamID = requirementString(infoString("CloudMountTeamIdentifier"))
+    let providerID = requirementString(infoString("CloudMountFileProviderBundleIdentifier"))
+    return "anchor apple generic and certificate leaf[subject.OU] = \(teamID) and identifier \(providerID)"
+}()
+
+private func stringResult(_ pointer: UnsafeMutablePointer<CChar>?) -> String {
+    guard let pointer else { return #"{"ok":false,"error":{"code":"internal_error","message":"bridge returned no response"}}"# }
+    defer { RcloneCloudMountFreeString(pointer) }
+    return String(cString: pointer)
+}
+
+private func sanitizedResult(_ result: String) -> String {
+    guard let data = result.data(using: .utf8),
+          let response = try? JSONDecoder().decode(CloudMountBridgeResponse.self, from: data),
+          !response.ok else { return result }
+    let code = response.error?.code ?? "backend_error"
+    let message = code == "not_found" ? "item not found" : "backend operation failed"
+    let sanitized = CloudMountBridgeResponse(ok: false, items: nil, item: nil, error: CloudMountBridgeError(code: code, message: message))
+    guard let encoded = try? JSONEncoder().encode(sanitized) else {
+        return #"{"ok":false,"error":{"code":"internal_error","message":"backend operation failed"}}"#
+    }
+    return String(decoding: encoded, as: UTF8.self)
+}
+
+private final class ControlService: NSObject, CloudMountControlProtocol {
     func ping(reply: @escaping (String) -> Void) {
         logger.notice("received ping")
         reply("pong")
-    }
-
-    private func stringResult(_ pointer: UnsafeMutablePointer<CChar>?) -> String {
-        guard let pointer else { return #"{"ok":false,"error":{"code":"internal_error","message":"bridge returned no response"}}"# }
-        defer { RcloneCloudMountFreeString(pointer) }
-        return String(cString: pointer)
     }
 
     private func storeError(_ error: Error) -> NSError { error as NSError }
@@ -62,13 +80,18 @@ private final class AgentService: NSObject, CloudMountAgentProtocol {
             catch { reply(false, self.storeError(error)) }
         }
     }
+}
+
+private final class DataService: NSObject, CloudMountDataProtocol {
+    private func storeError(_ error: Error) -> NSError { error as NSError }
 
     func listDirectory(domainIdentifier: String, path: String, reply: @escaping (String?, NSError?) -> Void) {
         backendQueue.async {
             do {
                 let remote = try configurationStore.remote(domainIdentifier: domainIdentifier)
-                logger.notice("Go-backed List domain=\(domainIdentifier, privacy: .public) path=\(path, privacy: .public)")
-                reply(remote.withCString { r in path.withCString { p in self.stringResult(RcloneCloudMountList(r, p)) } }, nil)
+                logger.notice("Go-backed List domain=\(domainIdentifier, privacy: .public) path=\(path, privacy: .private)")
+                let result = remote.withCString { r in path.withCString { p in stringResult(RcloneCloudMountList(r, p)) } }
+                reply(sanitizedResult(result), nil)
             } catch { reply(nil, self.storeError(error)) }
         }
     }
@@ -77,8 +100,9 @@ private final class AgentService: NSObject, CloudMountAgentProtocol {
         backendQueue.async {
             do {
                 let remote = try configurationStore.remote(domainIdentifier: domainIdentifier)
-                logger.notice("Go-backed Stat domain=\(domainIdentifier, privacy: .public) path=\(path, privacy: .public) directory=\(isDirectory)")
-                reply(remote.withCString { r in path.withCString { p in self.stringResult(RcloneCloudMountStat(r, p, isDirectory ? 1 : 0)) } }, nil)
+                logger.notice("Go-backed Stat domain=\(domainIdentifier, privacy: .public) path=\(path, privacy: .private) directory=\(isDirectory)")
+                let result = remote.withCString { r in path.withCString { p in stringResult(RcloneCloudMountStat(r, p, isDirectory ? 1 : 0)) } }
+                reply(sanitizedResult(result), nil)
             } catch { reply(nil, self.storeError(error)) }
         }
     }
@@ -94,22 +118,33 @@ private final class AgentService: NSObject, CloudMountAgentProtocol {
             let remote: String
             do { remote = try configurationStore.remote(domainIdentifier: domainIdentifier) }
             catch { reply(self.storeError(error)); return }
-            logger.notice("Go-backed Fetch domain=\(domainIdentifier, privacy: .public) path=\(path, privacy: .public)")
-            let json = remote.withCString { r in path.withCString { p in self.stringResult(RcloneCloudMountFetchFD(r, p, Int32(fileHandle.fileDescriptor))) } }
+            logger.notice("Go-backed Fetch domain=\(domainIdentifier, privacy: .public) path=\(path, privacy: .private)")
+            let rawJSON = remote.withCString { r in path.withCString { p in stringResult(RcloneCloudMountFetchFD(r, p, Int32(fileHandle.fileDescriptor))) } }
+            let json = sanitizedResult(rawJSON)
             guard let data = json.data(using: .utf8), let response = try? JSONDecoder().decode(CloudMountBridgeResponse.self, from: data) else { reply(NSError(domain: "org.rclone.cloudmount", code: 1, userInfo: [NSLocalizedDescriptionKey: "invalid bridge response"])); return }
-            if response.ok { logger.notice("Go-backed Fetch completed path=\(path, privacy: .public)"); reply(nil) }
-            else { let message = response.error?.message ?? "backend fetch failed"; logger.error("Go-backed Fetch failed path=\(path, privacy: .public): \(message, privacy: .private)"); let code = response.error?.code == "not_found" ? 404 : 2; reply(NSError(domain: "org.rclone.cloudmount", code: code, userInfo: [NSLocalizedDescriptionKey: message])) }
+            if response.ok { logger.notice("Go-backed Fetch completed path=\(path, privacy: .private)"); reply(nil) }
+            else { let message = response.error?.message ?? "backend operation failed"; logger.error("Go-backed Fetch failed path=\(path, privacy: .private) code=\(response.error?.code ?? "backend_error", privacy: .public)"); let code = response.error?.code == "not_found" ? 404 : 2; reply(NSError(domain: "org.rclone.cloudmount", code: code, userInfo: [NSLocalizedDescriptionKey: message])) }
         }
     }
 }
 
 private final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
-    private let service = AgentService()
+    private let service: Any
+    private let interface: NSXPCInterface
+    private let peerRequirement: String
+    private let role: String
+
+    init(service: Any, protocol: Protocol, peerRequirement: String, role: String) {
+        self.service = service
+        self.interface = NSXPCInterface(with: `protocol`)
+        self.peerRequirement = peerRequirement
+        self.role = role
+    }
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
-        connection.setCodeSigningRequirement(peerCodeSigningRequirement)
-        logger.notice("configured same-team XPC peer authentication")
-        connection.exportedInterface = NSXPCInterface(with: CloudMountAgentProtocol.self)
+        connection.setCodeSigningRequirement(peerRequirement)
+        logger.notice("configured \(self.role, privacy: .public) XPC peer authentication")
+        connection.exportedInterface = interface
         connection.exportedObject = service
         connection.invalidationHandler = { logger.notice("XPC connection invalidated") }
         connection.interruptionHandler = { logger.notice("XPC connection interrupted") }
@@ -118,9 +153,13 @@ private final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
     }
 }
 
-private let delegate = ListenerDelegate()
-private let listener = NSXPCListener(machServiceName: CloudMountConstants.machServiceName)
-listener.delegate = delegate
-logger.notice("agent listening on \(CloudMountConstants.machServiceName, privacy: .public)")
-listener.resume()
+private let controlDelegate = ListenerDelegate(service: ControlService(), protocol: CloudMountControlProtocol.self, peerRequirement: controlPeerCodeSigningRequirement, role: "control")
+private let dataDelegate = ListenerDelegate(service: DataService(), protocol: CloudMountDataProtocol.self, peerRequirement: dataPeerCodeSigningRequirement, role: "data")
+private let controlListener = NSXPCListener(machServiceName: infoString("CloudMountControlMachService"))
+private let dataListener = NSXPCListener(machServiceName: infoString("CloudMountDataMachService"))
+controlListener.delegate = controlDelegate
+dataListener.delegate = dataDelegate
+logger.notice("agent listening on separate control and data services")
+controlListener.resume()
+dataListener.resume()
 RunLoop.current.run()

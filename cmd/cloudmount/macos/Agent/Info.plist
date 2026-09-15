@@ -6,7 +6,8 @@
 <key>CFBundlePackageType</key><string>BNDL</string>
 <key>CFBundleShortVersionString</key><string>1.0</string>
 <key>CFBundleVersion</key><string>1</string>
-<key>CloudMountMachService</key><string>$(CLOUDMOUNT_MACH_SERVICE)</string>
+<key>CloudMountControlMachService</key><string>$(CLOUDMOUNT_CONTROL_MACH_SERVICE)</string>
+<key>CloudMountDataMachService</key><string>$(CLOUDMOUNT_DATA_MACH_SERVICE)</string>
 <key>CloudMountTeamIdentifier</key><string>$(CLOUDMOUNT_TEAM_ID)</string>
 <key>CloudMountAppBundleIdentifier</key><string>$(CLOUDMOUNT_BUNDLE_ID)</string>
 <key>CloudMountFileProviderBundleIdentifier</key><string>$(CLOUDMOUNT_BUNDLE_ID).FileProvider</string>

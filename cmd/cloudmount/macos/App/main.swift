@@ -41,12 +41,12 @@ func domain() -> NSFileProviderDomain {
     return domain
 }
 
-func withAgent(_ operation: (CloudMountAgentProtocol, @escaping (Error?) -> Void) -> Void) throws {
-    let connection = CloudMountXPC.connection()
+func withAgent(_ operation: (CloudMountControlProtocol, @escaping (Error?) -> Void) -> Void) throws {
+    let connection = CloudMountXPC.controlConnection()
     let semaphore = DispatchSemaphore(value: 0)
     var failure: Error?
     connection.resume()
-    guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in failure = error; semaphore.signal() }) as? CloudMountAgentProtocol else {
+    guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in failure = error; semaphore.signal() }) as? CloudMountControlProtocol else {
         connection.invalidate(); throw ControlError.operation("could not create agent XPC proxy")
     }
     operation(proxy) { error in failure = error; semaphore.signal() }
@@ -56,10 +56,10 @@ func withAgent(_ operation: (CloudMountAgentProtocol, @escaping (Error?) -> Void
 }
 
 func pingAgent() throws {
-    let connection = CloudMountXPC.connection(); let semaphore = DispatchSemaphore(value: 0)
+    let connection = CloudMountXPC.controlConnection(); let semaphore = DispatchSemaphore(value: 0)
     var value: String?; var failure: Error?
     connection.resume()
-    guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in failure = error; semaphore.signal() }) as? CloudMountAgentProtocol else { connection.invalidate(); throw ControlError.operation("could not create agent XPC proxy") }
+    guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in failure = error; semaphore.signal() }) as? CloudMountControlProtocol else { connection.invalidate(); throw ControlError.operation("could not create agent XPC proxy") }
     proxy.ping { value = $0; semaphore.signal() }
     guard semaphore.wait(timeout: .now() + 10) == .success else { connection.invalidate(); throw ControlError.operation("agent ping timed out") }
     connection.invalidate(); if let failure { throw failure }
@@ -67,10 +67,10 @@ func pingAgent() throws {
 }
 
 func configurationStatus(domainIdentifier: String) throws -> Bool {
-    let connection = CloudMountXPC.connection(); let semaphore = DispatchSemaphore(value: 0)
+    let connection = CloudMountXPC.controlConnection(); let semaphore = DispatchSemaphore(value: 0)
     var configured = false; var failure: Error?
     connection.resume()
-    guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in failure = error; semaphore.signal() }) as? CloudMountAgentProtocol else { connection.invalidate(); throw ControlError.operation("could not create agent XPC proxy") }
+    guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in failure = error; semaphore.signal() }) as? CloudMountControlProtocol else { connection.invalidate(); throw ControlError.operation("could not create agent XPC proxy") }
     proxy.domainConfigurationStatus(domainIdentifier: domainIdentifier) { configured = $0; failure = $1; semaphore.signal() }
     guard semaphore.wait(timeout: .now() + 10) == .success else { connection.invalidate(); throw ControlError.operation("domain configuration status timed out") }
     connection.invalidate(); if let failure { throw failure }; return configured
