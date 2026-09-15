@@ -3,7 +3,8 @@
 
 char *RcloneCloudMountList(const char *remote, const char *directory);
 char *RcloneCloudMountStat(const char *remote, const char *path, int isDirectory);
-char *RcloneCloudMountFetch(const char *remote, const char *path, const char *destinationPath);
+/* FetchFD duplicates fd and owns/closes only its duplicate. */
+char *RcloneCloudMountFetchFD(const char *remote, const char *path, int fd);
 void RcloneCloudMountFreeString(char *value);
 
 #endif

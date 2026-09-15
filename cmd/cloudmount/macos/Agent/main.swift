@@ -3,6 +3,10 @@ import os
 
 private let logger = Logger(subsystem: "org.rclone.cloudmount", category: "agent")
 private let backendQueue = DispatchQueue(label: "org.rclone.cloudmount.backend", attributes: .concurrent)
+private let configurationStore: DomainConfigurationStore = {
+    do { return try DomainConfigurationStore.applicationSupportStore() }
+    catch { fatalError("unable to locate CloudMount configuration store: \(error.localizedDescription)") }
+}()
 
 private func infoString(_ key: String) -> String {
     guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String, !value.isEmpty else {
@@ -36,29 +40,62 @@ private final class AgentService: NSObject, CloudMountAgentProtocol {
         return String(cString: pointer)
     }
 
-    func listDirectory(remote: String, path: String, reply: @escaping (String?, NSError?) -> Void) {
+    private func storeError(_ error: Error) -> NSError { error as NSError }
+
+    func configureDomain(domainIdentifier: String, remote: String, reply: @escaping (NSError?) -> Void) {
         backendQueue.async {
-            logger.notice("Go-backed List path=\(path, privacy: .public)")
-            reply(remote.withCString { r in path.withCString { p in self.stringResult(RcloneCloudMountList(r, p)) } }, nil)
+            do { try configurationStore.configure(domainIdentifier: domainIdentifier, remote: remote); logger.notice("configured domain \(domainIdentifier, privacy: .public)"); reply(nil) }
+            catch { logger.error("failed to configure domain \(domainIdentifier, privacy: .public): \(error.localizedDescription, privacy: .private)"); reply(self.storeError(error)) }
         }
     }
 
-    func statItem(remote: String, path: String, isDirectory: Bool, reply: @escaping (String?, NSError?) -> Void) {
+    func removeDomainConfiguration(domainIdentifier: String, reply: @escaping (NSError?) -> Void) {
         backendQueue.async {
-            logger.notice("Go-backed Stat path=\(path, privacy: .public) directory=\(isDirectory)")
-            reply(remote.withCString { r in path.withCString { p in self.stringResult(RcloneCloudMountStat(r, p, isDirectory ? 1 : 0)) } }, nil)
+            do { try configurationStore.remove(domainIdentifier: domainIdentifier); logger.notice("removed domain configuration \(domainIdentifier, privacy: .public)"); reply(nil) }
+            catch { logger.error("failed to remove domain configuration \(domainIdentifier, privacy: .public): \(error.localizedDescription, privacy: .private)"); reply(self.storeError(error)) }
+        }
+    }
+
+    func domainConfigurationStatus(domainIdentifier: String, reply: @escaping (Bool, NSError?) -> Void) {
+        backendQueue.async {
+            do { reply(try configurationStore.isConfigured(domainIdentifier: domainIdentifier), nil) }
+            catch { reply(false, self.storeError(error)) }
+        }
+    }
+
+    func listDirectory(domainIdentifier: String, path: String, reply: @escaping (String?, NSError?) -> Void) {
+        backendQueue.async {
+            do {
+                let remote = try configurationStore.remote(domainIdentifier: domainIdentifier)
+                logger.notice("Go-backed List domain=\(domainIdentifier, privacy: .public) path=\(path, privacy: .public)")
+                reply(remote.withCString { r in path.withCString { p in self.stringResult(RcloneCloudMountList(r, p)) } }, nil)
+            } catch { reply(nil, self.storeError(error)) }
+        }
+    }
+
+    func statItem(domainIdentifier: String, path: String, isDirectory: Bool, reply: @escaping (String?, NSError?) -> Void) {
+        backendQueue.async {
+            do {
+                let remote = try configurationStore.remote(domainIdentifier: domainIdentifier)
+                logger.notice("Go-backed Stat domain=\(domainIdentifier, privacy: .public) path=\(path, privacy: .public) directory=\(isDirectory)")
+                reply(remote.withCString { r in path.withCString { p in self.stringResult(RcloneCloudMountStat(r, p, isDirectory ? 1 : 0)) } }, nil)
+            } catch { reply(nil, self.storeError(error)) }
         }
     }
 
     func fetchContents(
-        remote: String,
+        domainIdentifier: String,
         path: String,
-        destinationPath: String,
+        fileHandle: FileHandle,
         reply: @escaping (NSError?) -> Void
     ) {
         backendQueue.async {
-            logger.notice("Go-backed Fetch path=\(path, privacy: .public)")
-            let json = remote.withCString { r in path.withCString { p in destinationPath.withCString { d in self.stringResult(RcloneCloudMountFetch(r, p, d)) } } }
+            defer { try? fileHandle.close() }
+            let remote: String
+            do { remote = try configurationStore.remote(domainIdentifier: domainIdentifier) }
+            catch { reply(self.storeError(error)); return }
+            logger.notice("Go-backed Fetch domain=\(domainIdentifier, privacy: .public) path=\(path, privacy: .public)")
+            let json = remote.withCString { r in path.withCString { p in self.stringResult(RcloneCloudMountFetchFD(r, p, Int32(fileHandle.fileDescriptor))) } }
             guard let data = json.data(using: .utf8), let response = try? JSONDecoder().decode(CloudMountBridgeResponse.self, from: data) else { reply(NSError(domain: "org.rclone.cloudmount", code: 1, userInfo: [NSLocalizedDescriptionKey: "invalid bridge response"])); return }
             if response.ok { logger.notice("Go-backed Fetch completed path=\(path, privacy: .public)"); reply(nil) }
             else { let message = response.error?.message ?? "backend fetch failed"; logger.error("Go-backed Fetch failed path=\(path, privacy: .public): \(message, privacy: .private)"); let code = response.error?.code == "not_found" ? 404 : 2; reply(NSError(domain: "org.rclone.cloudmount", code: code, userInfo: [NSLocalizedDescriptionKey: message])) }

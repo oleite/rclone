@@ -20,6 +20,7 @@
 		10000000000000000000000C /* UniformTypeIdentifiers.framework */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000B /* UniformTypeIdentifiers.framework */; };
 		10000000000000000000000D /* File Provider appex embed */ = {isa = PBXBuildFile; fileRef = 300000000000000000000002 /* RcloneCloudMountFileProvider.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, CodeSignOnCopy, ); }; };
 		10000000000000000000000E /* Agent executable embed */ = {isa = PBXBuildFile; fileRef = 300000000000000000000003 /* RcloneCloudMountAgent */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		10000000000000000000000F /* DomainConfigurationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* DomainConfigurationStore.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -51,6 +52,7 @@
 		200000000000000000000010 = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Local.xcconfig.example; sourceTree = "<group>"; };
 		200000000000000000000011 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = org.rclone.cloudmount.Agent.plist; sourceTree = "<group>"; };
 		200000000000000000000012 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = RcloneCloudMountDebug.entitlements; sourceTree = "<group>"; };
+		200000000000000000000013 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DomainConfigurationStore.swift; sourceTree = "<group>"; };
 		300000000000000000000001 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RcloneCloudMount.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		300000000000000000000002 = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = RcloneCloudMountFileProvider.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		300000000000000000000003 = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = RcloneCloudMountAgent; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -66,7 +68,7 @@
 		900000000000000000000001 = {isa = PBXGroup; children = (900000000000000000000002, 900000000000000000000003, 900000000000000000000004, 900000000000000000000005, 900000000000000000000006, 900000000000000000000007, 900000000000000000000008, ); sourceTree = "<group>"; };
 		900000000000000000000002 = {isa = PBXGroup; children = (200000000000000000000001, 200000000000000000000006, 20000000000000000000000C, 200000000000000000000012, ); path = App; sourceTree = "<group>"; };
 		900000000000000000000003 = {isa = PBXGroup; children = (200000000000000000000003, 200000000000000000000004, 200000000000000000000005, 20000000000000000000000D, 20000000000000000000000E, 200000000000000000000008, ); path = FileProvider; sourceTree = "<group>"; };
-		900000000000000000000004 = {isa = PBXGroup; children = (200000000000000000000007, ); path = Agent; sourceTree = "<group>"; };
+		900000000000000000000004 = {isa = PBXGroup; children = (200000000000000000000007, 200000000000000000000013, ); path = Agent; sourceTree = "<group>"; };
 		900000000000000000000005 = {isa = PBXGroup; children = (200000000000000000000002, ); path = Shared; sourceTree = "<group>"; };
 		900000000000000000000006 = {isa = PBXGroup; children = (20000000000000000000000F, 200000000000000000000010, ); path = Config; sourceTree = "<group>"; };
 		900000000000000000000007 = {isa = PBXGroup; children = (200000000000000000000011, ); path = Resources; sourceTree = "<group>"; };
@@ -91,7 +93,7 @@
 /* Begin PBXSourcesBuildPhase section */
 		B00000000000000000000001 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000001, 100000000000000000000002, ); runOnlyForDeploymentPostprocessing = 0; };
 		B00000000000000000000002 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000003, 100000000000000000000004, 100000000000000000000005, 100000000000000000000006, ); runOnlyForDeploymentPostprocessing = 0; };
-		B00000000000000000000003 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000007, 100000000000000000000008, ); runOnlyForDeploymentPostprocessing = 0; };
+		B00000000000000000000003 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000007, 100000000000000000000008, 10000000000000000000000F, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */

@@ -15,6 +15,7 @@ import (
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/cache"
+	"golang.org/x/sys/unix"
 )
 
 type bridgeError struct {
@@ -145,7 +146,7 @@ func stat(ctx context.Context, remote, remotePath string, isDirectory bool) brid
 	return failure(fs.ErrorDirNotFound)
 }
 
-func fetch(ctx context.Context, remote, remotePath, destinationPath string) bridgeResponse {
+func fetchFD(ctx context.Context, remote, remotePath string, descriptor int) bridgeResponse {
 	f, err := getFs(ctx, remote)
 	if err != nil {
 		return failure(err)
@@ -158,40 +159,59 @@ func fetch(ctx context.Context, remote, remotePath, destinationPath string) brid
 	if err != nil {
 		return failure(err)
 	}
-	if err := copyToDestination(source, destinationPath); err != nil {
+	if _, err := copyToDescriptor(source, descriptor, unix.Dup); err != nil {
 		return failure(err)
 	}
 	return bridgeResponse{OK: true}
 }
 
-func copyToDestination(source io.ReadCloser, destinationPath string) (result error) {
+func copyToDescriptor(source io.ReadCloser, descriptor int, duplicate func(int) (int, error)) (duplicateDescriptor int, result error) {
 	sourceClosed := false
 	defer func() {
 		if !sourceClosed {
 			_ = source.Close()
 		}
-		if result != nil {
-			_ = os.Remove(destinationPath)
+	}()
+	duplicateDescriptor, err := duplicate(descriptor)
+	if err != nil {
+		return -1, err
+	}
+	destination := os.NewFile(uintptr(duplicateDescriptor), "rclone-cloudmount-destination")
+	if destination == nil {
+		_ = unix.Close(duplicateDescriptor)
+		return duplicateDescriptor, errors.New("failed to wrap duplicated destination descriptor")
+	}
+	destinationClosed := false
+	defer func() {
+		if !destinationClosed {
+			_ = destination.Close()
 		}
 	}()
-	destination, err := os.Create(destinationPath)
-	if err != nil {
-		return err
+	if err := destination.Truncate(0); err != nil {
+		return duplicateDescriptor, err
+	}
+	if _, err := destination.Seek(0, io.SeekStart); err != nil {
+		return duplicateDescriptor, err
 	}
 	_, copyErr := io.Copy(destination, source)
 	sourceCloseErr := source.Close()
 	sourceClosed = true
+	syncErr := destination.Sync()
 	destinationCloseErr := destination.Close()
+	destinationClosed = true
 	if copyErr != nil {
-		return copyErr
+		return duplicateDescriptor, copyErr
 	}
 	if sourceCloseErr != nil {
-		return sourceCloseErr
+		return duplicateDescriptor, sourceCloseErr
+	}
+	if syncErr != nil {
+		return duplicateDescriptor, syncErr
 	}
 	if destinationCloseErr != nil {
-		return destinationCloseErr
+		return duplicateDescriptor, destinationCloseErr
 	}
-	return nil
+	return duplicateDescriptor, nil
 }
 func encodeResponse(response bridgeResponse) string {
 	data, err := json.Marshal(response)

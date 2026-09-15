@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 type failingReader struct{ read bool }
@@ -72,33 +74,49 @@ func TestStatFileAndDirectory(t *testing.T) {
 		t.Fatalf("directory stat = %+v", directory)
 	}
 }
-func TestFetchAndMissing(t *testing.T) {
+func TestFetchFDAndMissing(t *testing.T) {
 	root := fixture(t)
-	destination := filepath.Join(t.TempDir(), "output")
-	response := fetch(context.Background(), root, "folder/nested.txt", destination)
+	destination, err := os.CreateTemp(t.TempDir(), "output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	response := fetchFD(context.Background(), root, "folder/nested.txt", int(destination.Fd()))
 	if !response.OK {
 		t.Fatalf("fetch failed: %+v", response.Error)
 	}
-	got, err := os.ReadFile(destination)
+	if _, err := destination.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("caller descriptor was closed: %v", err)
+	}
+	got, err := io.ReadAll(destination)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(got) != "nested fixture\n" {
 		t.Fatalf("content = %q", got)
 	}
-	missing := fetch(context.Background(), root, "missing.txt", filepath.Join(t.TempDir(), "missing"))
+	missing := fetchFD(context.Background(), root, "missing.txt", int(destination.Fd()))
 	if missing.OK || missing.Error == nil || missing.Error.Code != "not_found" {
 		t.Fatalf("missing = %+v", missing)
 	}
 }
 
-func TestIncompleteDestinationRemoved(t *testing.T) {
-	destination := filepath.Join(t.TempDir(), "incomplete")
-	err := copyToDestination(io.ReadCloser(&failingReader{}), destination)
+func TestDuplicateClosedAfterFailure(t *testing.T) {
+	destination, err := os.CreateTemp(t.TempDir(), "incomplete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	captured := -1
+	duplicate := func(fd int) (int, error) { value, err := unix.Dup(fd); captured = value; return value, err }
+	_, err = copyToDescriptor(io.ReadCloser(&failingReader{}), int(destination.Fd()), duplicate)
 	if err == nil {
 		t.Fatal("expected forced read failure")
 	}
-	if _, statErr := os.Stat(destination); !os.IsNotExist(statErr) {
-		t.Fatalf("incomplete destination remains: %v", statErr)
+	if _, err := unix.FcntlInt(uintptr(captured), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+		t.Fatalf("duplicated descriptor remains open: %v", err)
+	}
+	if _, err := destination.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("caller descriptor was closed: %v", err)
 	}
 }

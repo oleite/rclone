@@ -2,12 +2,15 @@ import Foundation
 
 @objc protocol CloudMountAgentProtocol {
     func ping(reply: @escaping (String) -> Void)
-    func listDirectory(remote: String, path: String, reply: @escaping (String?, NSError?) -> Void)
-    func statItem(remote: String, path: String, isDirectory: Bool, reply: @escaping (String?, NSError?) -> Void)
+    func configureDomain(domainIdentifier: String, remote: String, reply: @escaping (NSError?) -> Void)
+    func removeDomainConfiguration(domainIdentifier: String, reply: @escaping (NSError?) -> Void)
+    func domainConfigurationStatus(domainIdentifier: String, reply: @escaping (Bool, NSError?) -> Void)
+    func listDirectory(domainIdentifier: String, path: String, reply: @escaping (String?, NSError?) -> Void)
+    func statItem(domainIdentifier: String, path: String, isDirectory: Bool, reply: @escaping (String?, NSError?) -> Void)
     func fetchContents(
-        remote: String,
+        domainIdentifier: String,
         path: String,
-        destinationPath: String,
+        fileHandle: FileHandle,
         reply: @escaping (NSError?) -> Void
     )
 }
@@ -24,7 +27,6 @@ struct CloudMountBridgeResponse: Codable {
 enum CloudMountConstants {
     static let domainIdentifier = "org.rclone.cloudmount.test"
     static let domainDisplayName = "Rclone CloudMount Test"
-    static let remoteUserInfoKey = "rcloneRemote"
 
     static var machServiceName: String {
         infoString("CloudMountMachService")
@@ -57,7 +59,8 @@ enum CloudMountXPC {
             options: []
         )
         connection.setCodeSigningRequirement(CloudMountConstants.agentCodeSigningRequirement)
-        connection.remoteObjectInterface = NSXPCInterface(with: CloudMountAgentProtocol.self)
+        let interface = NSXPCInterface(with: CloudMountAgentProtocol.self)
+        connection.remoteObjectInterface = interface
         return connection
     }
 }

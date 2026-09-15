@@ -39,10 +39,12 @@ func RcloneCloudMountStat(remote, remotePath *C.char, isDirectory C.int) *C.char
 	})
 }
 
-//export RcloneCloudMountFetch
-func RcloneCloudMountFetch(remote, remotePath, destinationPath *C.char) *C.char {
+// RcloneCloudMountFetchFD duplicates fd; Go owns and closes only the duplicate.
+//
+//export RcloneCloudMountFetchFD
+func RcloneCloudMountFetchFD(remote, remotePath *C.char, fd C.int) *C.char {
 	return exported(func() bridgeResponse {
-		return fetch(context.Background(), C.GoString(remote), C.GoString(remotePath), C.GoString(destinationPath))
+		return fetchFD(context.Background(), C.GoString(remote), C.GoString(remotePath), int(fd))
 	})
 }
 

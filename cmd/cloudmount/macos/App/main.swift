@@ -30,16 +30,50 @@ func waitForResult<T>(_ body: (@escaping (T?, Error?) -> Void) -> Void) throws -
     return result
 }
 
-func domain(remote: String? = nil) -> NSFileProviderDomain {
+func domain() -> NSFileProviderDomain {
     let domain = NSFileProviderDomain(
         identifier: NSFileProviderDomainIdentifier(CloudMountConstants.domainIdentifier),
         displayName: CloudMountConstants.domainDisplayName
     )
-    if #available(macOS 15.0, *), let remote { domain.userInfo = [CloudMountConstants.remoteUserInfoKey: remote] }
 #if CLOUDMOUNT_FILE_PROVIDER_TESTING_MODE
     domain.testingModes = [.alwaysEnabled]
 #endif
     return domain
+}
+
+func withAgent(_ operation: (CloudMountAgentProtocol, @escaping (Error?) -> Void) -> Void) throws {
+    let connection = CloudMountXPC.connection()
+    let semaphore = DispatchSemaphore(value: 0)
+    var failure: Error?
+    connection.resume()
+    guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in failure = error; semaphore.signal() }) as? CloudMountAgentProtocol else {
+        connection.invalidate(); throw ControlError.operation("could not create agent XPC proxy")
+    }
+    operation(proxy) { error in failure = error; semaphore.signal() }
+    guard semaphore.wait(timeout: .now() + 10) == .success else { connection.invalidate(); throw ControlError.operation("agent operation timed out") }
+    connection.invalidate()
+    if let failure { throw failure }
+}
+
+func pingAgent() throws {
+    let connection = CloudMountXPC.connection(); let semaphore = DispatchSemaphore(value: 0)
+    var value: String?; var failure: Error?
+    connection.resume()
+    guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in failure = error; semaphore.signal() }) as? CloudMountAgentProtocol else { connection.invalidate(); throw ControlError.operation("could not create agent XPC proxy") }
+    proxy.ping { value = $0; semaphore.signal() }
+    guard semaphore.wait(timeout: .now() + 10) == .success else { connection.invalidate(); throw ControlError.operation("agent ping timed out") }
+    connection.invalidate(); if let failure { throw failure }
+    guard value == "pong" else { throw ControlError.operation("unexpected ping reply: \(value ?? "nil")") }
+}
+
+func configurationStatus(domainIdentifier: String) throws -> Bool {
+    let connection = CloudMountXPC.connection(); let semaphore = DispatchSemaphore(value: 0)
+    var configured = false; var failure: Error?
+    connection.resume()
+    guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in failure = error; semaphore.signal() }) as? CloudMountAgentProtocol else { connection.invalidate(); throw ControlError.operation("could not create agent XPC proxy") }
+    proxy.domainConfigurationStatus(domainIdentifier: domainIdentifier) { configured = $0; failure = $1; semaphore.signal() }
+    guard semaphore.wait(timeout: .now() + 10) == .success else { connection.invalidate(); throw ControlError.operation("domain configuration status timed out") }
+    connection.invalidate(); if let failure { throw failure }; return configured
 }
 
 func agentStatusText(_ status: SMAppService.Status) -> String {
@@ -72,50 +106,35 @@ func run() throws {
     case "agent-status":
         print(agentStatusText(service.status))
     case "agent-ping":
-        let connection = CloudMountXPC.connection()
-        let semaphore = DispatchSemaphore(value: 0)
-        var response: String?
-        var failure: Error?
-        connection.invalidationHandler = { semaphore.signal() }
-        connection.interruptionHandler = { semaphore.signal() }
-        connection.resume()
-        let proxy = connection.remoteObjectProxyWithErrorHandler { error in
-            failure = error
-            semaphore.signal()
-        } as? CloudMountAgentProtocol
-        guard let proxy else {
-            connection.invalidate()
-            throw ControlError.operation("could not create agent XPC proxy")
-        }
-        proxy.ping { value in response = value; semaphore.signal() }
-        guard semaphore.wait(timeout: .now() + 10) == .success else {
-            connection.invalidate()
-            throw ControlError.operation("agent ping timed out")
-        }
-        connection.invalidate()
-        if let failure { throw failure }
-        guard response == "pong" else { throw ControlError.operation("unexpected ping reply: \(response ?? "nil")") }
+        try pingAgent()
         print("pong")
     case "domain-add-test":
         guard CommandLine.arguments.count == 3 else { throw ControlError.usage }
         let remote = CommandLine.arguments[2]
         guard !remote.isEmpty else { throw ControlError.usage }
-        try waitForResult { completion in
-            NSFileProviderManager.add(domain(remote: remote), completionHandler: { completion((), $0) })
-        } as Void?
+        try pingAgent()
+        try withAgent { proxy, completion in proxy.configureDomain(domainIdentifier: CloudMountConstants.domainIdentifier, remote: remote) { completion($0) } }
+        do {
+            try waitForResult { completion in NSFileProviderManager.add(domain(), completionHandler: { completion((), $0) }) } as Void?
+        } catch {
+            do { try withAgent { proxy, completion in proxy.removeDomainConfiguration(domainIdentifier: CloudMountConstants.domainIdentifier) { completion($0) } } }
+            catch let rollbackError { throw ControlError.operation("domain registration failed; Agent configuration rollback also failed: \(error.localizedDescription); rollback: \(rollbackError.localizedDescription)") }
+            throw ControlError.operation("domain registration failed; Agent configuration rolled back: \(error.localizedDescription)")
+        }
         print("domain added: \(CloudMountConstants.domainIdentifier)")
     case "domain-list":
         let domains: [NSFileProviderDomain] = try waitForResult { completion in
             NSFileProviderManager.getDomainsWithCompletionHandler { completion($0, $1) }
         } ?? []
         for value in domains {
-            let configured = if #available(macOS 15.0, *) { value.userInfo?[CloudMountConstants.remoteUserInfoKey] as? String != nil } else { false }
+            let configured = try configurationStatus(domainIdentifier: value.identifier.rawValue)
             print("identifier=\(value.identifier.rawValue) displayName=\(value.displayName) userEnabled=\(value.userEnabled) remoteConfigured=\(configured)")
         }
     case "domain-remove-test":
-        try waitForResult { completion in
-            NSFileProviderManager.remove(domain(), completionHandler: { completion((), $0) })
-        } as Void?
+        do { try waitForResult { completion in NSFileProviderManager.remove(domain(), completionHandler: { completion((), $0) }) } as Void? }
+        catch { throw ControlError.operation("File Provider domain removal failed; Agent configuration retained: \(error.localizedDescription)") }
+        do { try withAgent { proxy, completion in proxy.removeDomainConfiguration(domainIdentifier: CloudMountConstants.domainIdentifier) { completion($0) } } }
+        catch { throw ControlError.operation("File Provider domain removed, but Agent configuration removal failed: \(error.localizedDescription)") }
         print("domain removed: \(CloudMountConstants.domainIdentifier)")
     default:
         throw ControlError.usage

@@ -49,8 +49,15 @@ with a Personal Team, set `CLOUDMOUNT_APP_DEBUG_ENTITLEMENTS` to
 user-enabled behavior without changing Release configuration.
 
 The fixed development domain is `org.rclone.cloudmount.test`, displayed as
-`Rclone CloudMount Test`. `domain-add-test` stores the selected rclone root in the
-domain's `userInfo`; it does not store credentials or an rclone configuration.
+`Rclone CloudMount Test`. `domain-add-test` first stores the domain-to-remote
+mapping in the LaunchAgent and then registers a plain File Provider domain. The
+File Provider receives only the domain identifier and relative paths; it never
+receives or stores the rclone remote selector.
+
+The LaunchAgent persists its versioned mapping in
+`~/Library/Application Support/Rclone CloudMount/domains.json`. The directory is
+mode `0700`, the file is mode `0600`, and updates are atomic. Removing the test
+domain removes the File Provider domain first and its Agent mapping second.
 
 The read-only data path is direct:
 
@@ -58,6 +65,11 @@ The read-only data path is direct:
 File Provider -> authenticated XPC -> Agent -> fs/cache.Get
               -> fs.Fs.List / fs.Fs.NewObject -> fs.Object.Open
 ```
+
+For hydration, the File Provider creates its temporary destination and passes an
+open `FileHandle` over XPC. The Agent passes that descriptor to the Go bridge;
+Go duplicates it and owns only the duplicate. No destination pathname crosses
+the XPC boundary.
 
 CloudMount does not import or instantiate `vfs.VFS`. Some registered backends may
 use VFS internally as their own implementation detail. Phase 2A uses temporary
