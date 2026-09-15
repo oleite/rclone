@@ -35,7 +35,7 @@ func domain() -> NSFileProviderDomain {
         identifier: NSFileProviderDomainIdentifier(CloudMountConstants.domainIdentifier),
         displayName: CloudMountConstants.domainDisplayName
     )
-#if DEBUG
+#if CLOUDMOUNT_FILE_PROVIDER_TESTING_MODE
     domain.testingModes = [.alwaysEnabled]
 #endif
     return domain

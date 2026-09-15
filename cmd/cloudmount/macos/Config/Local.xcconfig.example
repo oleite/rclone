@@ -4,3 +4,8 @@ DEVELOPMENT_TEAM = YOUR_TEAM_ID
 CLOUDMOUNT_TEAM_ID = $(DEVELOPMENT_TEAM)
 CLOUDMOUNT_BUNDLE_ID = org.example.rclone.cloudmount
 CLOUDMOUNT_APP_GROUP_SUFFIX = org.example.rclone.cloudmount
+
+// Personal Teams do not support File Provider testing mode. Uncomment both
+// settings to use ordinary user-enabled File Provider behavior.
+// CLOUDMOUNT_APP_DEBUG_ENTITLEMENTS = App/RcloneCloudMount.entitlements
+// CLOUDMOUNT_TESTING_MODE_SWIFT_CONDITION =

@@ -40,6 +40,12 @@ enabled. Release builds omit that entitlement and report the domain's real
 `userEnabled` value; enable the provider under **System Settings > General > Login
 Items & Extensions > File Providers** when needed.
 
+Personal Teams cannot sign the testing-mode entitlement. For local development
+with a Personal Team, set `CLOUDMOUNT_APP_DEBUG_ENTITLEMENTS` to
+`App/RcloneCloudMount.entitlements` and clear
+`CLOUDMOUNT_TESTING_MODE_SWIFT_CONDITION` in `Local.xcconfig`. This selects normal
+user-enabled behavior without changing Release configuration.
+
 The fixed test domain is `org.rclone.cloudmount.synthetic-test`, displayed as
 `Rclone CloudMount Test`. Its read-only `hello.txt` is populated by the agent with:
 
