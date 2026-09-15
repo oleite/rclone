@@ -44,13 +44,47 @@ private func sanitizedResult(_ result: String) -> String {
           let response = try? JSONDecoder().decode(CloudMountBridgeResponse.self, from: data),
           !response.ok else { return result }
     let code = response.error?.code ?? "backend_error"
-    let message = code == "not_found" ? "item not found" : "backend operation failed"
+    let message: String
+    switch code {
+    case "not_found": message = "item not found"
+    case "cancelled": message = "transfer cancelled"
+    case "invalid_range": message = "invalid byte range"
+    case "short_range_read": message = "incomplete byte range"
+    default: message = "backend operation failed"
+    }
     let sanitized = CloudMountBridgeResponse(ok: false, items: nil, item: nil, error: CloudMountBridgeError(code: code, message: message))
     guard let encoded = try? JSONEncoder().encode(sanitized) else {
         return #"{"ok":false,"error":{"code":"internal_error","message":"backend operation failed"}}"#
     }
     return String(decoding: encoded, as: UTF8.self)
 }
+
+private final class FetchOperations {
+    private let lock = NSLock()
+    private var transfers: [String: UInt64] = [:]
+    private func key(_ domainIdentifier: String, _ operationIdentifier: String) -> String { domainIdentifier + "\0" + operationIdentifier }
+
+    func register(domainIdentifier: String, operationIdentifier: String) -> UInt64? {
+        lock.lock(); defer { lock.unlock() }
+        let operationKey = key(domainIdentifier, operationIdentifier)
+        guard transfers[operationKey] == nil else { return nil }
+        let transfer = RcloneCloudMountTransferCreate()
+        transfers[operationKey] = transfer
+        return transfer
+    }
+
+    func cancel(domainIdentifier: String, operationIdentifier: String) {
+        lock.lock(); let transfer = transfers[key(domainIdentifier, operationIdentifier)]; lock.unlock()
+        if let transfer { RcloneCloudMountTransferCancel(transfer) }
+    }
+
+    func release(domainIdentifier: String, operationIdentifier: String, transfer: UInt64) {
+        lock.lock(); transfers.removeValue(forKey: key(domainIdentifier, operationIdentifier)); lock.unlock()
+        RcloneCloudMountTransferRelease(transfer)
+    }
+}
+
+private let fetchOperations = FetchOperations()
 
 private final class ControlService: NSObject, CloudMountControlProtocol {
     func ping(reply: @escaping (String) -> Void) {
@@ -110,21 +144,49 @@ private final class DataService: NSObject, CloudMountDataProtocol {
     func fetchContents(
         domainIdentifier: String,
         path: String,
+        operationIdentifier: String,
         fileHandle: FileHandle,
         reply: @escaping (NSError?) -> Void
     ) {
+        guard let transfer = fetchOperations.register(domainIdentifier: domainIdentifier, operationIdentifier: operationIdentifier) else {
+            reply(NSError(domain: "org.rclone.cloudmount", code: 3, userInfo: [NSLocalizedDescriptionKey: "duplicate fetch operation"])); return
+        }
         backendQueue.async {
-            defer { try? fileHandle.close() }
+            defer { try? fileHandle.close(); fetchOperations.release(domainIdentifier: domainIdentifier, operationIdentifier: operationIdentifier, transfer: transfer) }
             let remote: String
             do { remote = try configurationStore.remote(domainIdentifier: domainIdentifier) }
             catch { reply(self.storeError(error)); return }
             logger.notice("Go-backed Fetch domain=\(domainIdentifier, privacy: .public) path=\(path, privacy: .private)")
-            let rawJSON = remote.withCString { r in path.withCString { p in stringResult(RcloneCloudMountFetchFD(r, p, Int32(fileHandle.fileDescriptor))) } }
+            let rawJSON = remote.withCString { r in path.withCString { p in stringResult(RcloneCloudMountFetchFD(r, p, Int32(fileHandle.fileDescriptor), transfer)) } }
             let json = sanitizedResult(rawJSON)
             guard let data = json.data(using: .utf8), let response = try? JSONDecoder().decode(CloudMountBridgeResponse.self, from: data) else { reply(NSError(domain: "org.rclone.cloudmount", code: 1, userInfo: [NSLocalizedDescriptionKey: "invalid bridge response"])); return }
             if response.ok { logger.notice("Go-backed Fetch completed path=\(path, privacy: .private)"); reply(nil) }
             else { let message = response.error?.message ?? "backend operation failed"; logger.error("Go-backed Fetch failed path=\(path, privacy: .private) code=\(response.error?.code ?? "backend_error", privacy: .public)"); let code = response.error?.code == "not_found" ? 404 : 2; reply(NSError(domain: "org.rclone.cloudmount", code: code, userInfo: [NSLocalizedDescriptionKey: message])) }
         }
+    }
+
+    func fetchPartialContents(domainIdentifier: String, path: String, operationIdentifier: String, offset: Int64, length: Int64, fileHandle: FileHandle, reply: @escaping (NSError?) -> Void) {
+        guard let transfer = fetchOperations.register(domainIdentifier: domainIdentifier, operationIdentifier: operationIdentifier) else {
+            reply(NSError(domain: "org.rclone.cloudmount", code: 3, userInfo: [NSLocalizedDescriptionKey: "duplicate fetch operation"])); return
+        }
+        backendQueue.async {
+            defer { try? fileHandle.close(); fetchOperations.release(domainIdentifier: domainIdentifier, operationIdentifier: operationIdentifier, transfer: transfer) }
+            let remote: String
+            do { remote = try configurationStore.remote(domainIdentifier: domainIdentifier) }
+            catch { reply(self.storeError(error)); return }
+            logger.notice("Go-backed range fetch domain=\(domainIdentifier, privacy: .public) path=\(path, privacy: .private) offset=\(offset) length=\(length)")
+            let rawJSON = remote.withCString { r in path.withCString { p in stringResult(RcloneCloudMountFetchRangeFD(r, p, Int32(fileHandle.fileDescriptor), offset, length, transfer)) } }
+            let json = sanitizedResult(rawJSON)
+            guard let data = json.data(using: .utf8), let response = try? JSONDecoder().decode(CloudMountBridgeResponse.self, from: data) else { reply(NSError(domain: "org.rclone.cloudmount", code: 1, userInfo: [NSLocalizedDescriptionKey: "invalid bridge response"])); return }
+            if response.ok { logger.notice("Go-backed range fetch completed offset=\(offset) length=\(length)"); reply(nil) }
+            else { let message = response.error?.message ?? "backend operation failed"; let code = response.error?.code == "cancelled" ? NSUserCancelledError : 2; reply(NSError(domain: "org.rclone.cloudmount", code: code, userInfo: [NSLocalizedDescriptionKey: message])) }
+        }
+    }
+
+    func cancelFetch(domainIdentifier: String, operationIdentifier: String, reply: @escaping () -> Void) {
+        fetchOperations.cancel(domainIdentifier: domainIdentifier, operationIdentifier: operationIdentifier)
+        logger.notice("cancelled fetch operation domain=\(domainIdentifier, privacy: .public)")
+        reply()
     }
 }
 

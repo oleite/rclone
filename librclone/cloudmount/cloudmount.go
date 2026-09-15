@@ -11,11 +11,18 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/cache"
 	"golang.org/x/sys/unix"
+)
+
+var (
+	errInvalidRange    = errors.New("invalid range")
+	errShortRangeRead  = errors.New("short range read")
+	errInvalidTransfer = errors.New("invalid transfer handle")
 )
 
 type bridgeError struct {
@@ -40,6 +47,14 @@ type bridgeResponse struct {
 
 func errorCode(err error) string {
 	switch {
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	case errors.Is(err, errInvalidRange):
+		return "invalid_range"
+	case errors.Is(err, errShortRangeRead):
+		return "short_range_read"
+	case errors.Is(err, errInvalidTransfer):
+		return "invalid_transfer"
 	case errors.Is(err, fs.ErrorObjectNotFound), errors.Is(err, fs.ErrorDirNotFound):
 		return "not_found"
 	case errors.Is(err, fs.ErrorPermissionDenied):
@@ -159,57 +174,137 @@ func fetchFD(ctx context.Context, remote, remotePath string, descriptor int) bri
 	if err != nil {
 		return failure(err)
 	}
-	if _, err := copyToDescriptor(source, descriptor, unix.Dup); err != nil {
+	if _, err := copyToDescriptor(ctx, source, descriptor, unix.Dup); err != nil {
 		return failure(err)
 	}
 	return bridgeResponse{OK: true}
 }
 
-func copyToDescriptor(source io.ReadCloser, descriptor int, duplicate func(int) (int, error)) (duplicateDescriptor int, result error) {
-	sourceClosed := false
-	defer func() {
-		if !sourceClosed {
-			_ = source.Close()
+func fetchRangeFD(ctx context.Context, remote, remotePath string, descriptor int, offset, length int64) bridgeResponse {
+	f, err := getFs(ctx, remote)
+	if err != nil {
+		return failure(err)
+	}
+	object, err := f.NewObject(ctx, remotePath)
+	if err != nil {
+		return failure(err)
+	}
+	size := object.Size()
+	if offset < 0 || length <= 0 || size < 0 || offset >= size || length > size-offset {
+		return failure(errInvalidRange)
+	}
+	end := offset + length - 1
+	source, err := object.Open(ctx, &fs.RangeOption{Start: offset, End: end})
+	if err != nil {
+		return failure(err)
+	}
+	if _, err := copyRangeToDescriptor(ctx, source, descriptor, offset, length, unix.Dup); err != nil {
+		return failure(err)
+	}
+	return bridgeResponse{OK: true}
+}
+
+type onceReadCloser struct {
+	source io.ReadCloser
+	once   sync.Once
+}
+
+func (source *onceReadCloser) Read(buffer []byte) (int, error) { return source.source.Read(buffer) }
+func (source *onceReadCloser) Close() error {
+	var err error
+	source.once.Do(func() { err = source.source.Close() })
+	return err
+}
+
+func copyWithCancellation(ctx context.Context, destination io.Writer, source io.ReadCloser, length *int64) error {
+	closer := &onceReadCloser{source: source}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = closer.Close()
+		case <-done:
 		}
 	}()
+	var copyErr error
+	if length == nil {
+		_, copyErr = io.Copy(destination, closer)
+	} else {
+		written, err := io.CopyN(destination, closer, *length)
+		if err != nil || written != *length {
+			copyErr = errShortRangeRead
+		}
+	}
+	close(done)
+	closeErr := closer.Close()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
+}
+
+func duplicateDestination(descriptor int, duplicate func(int) (int, error)) (int, *os.File, error) {
 	duplicateDescriptor, err := duplicate(descriptor)
 	if err != nil {
-		return -1, err
+		return -1, nil, err
 	}
 	destination := os.NewFile(uintptr(duplicateDescriptor), "rclone-cloudmount-destination")
 	if destination == nil {
 		_ = unix.Close(duplicateDescriptor)
-		return duplicateDescriptor, errors.New("failed to wrap duplicated destination descriptor")
+		return duplicateDescriptor, nil, errors.New("failed to wrap duplicated destination descriptor")
 	}
-	destinationClosed := false
-	defer func() {
-		if !destinationClosed {
-			_ = destination.Close()
-		}
-	}()
+	return duplicateDescriptor, destination, nil
+}
+
+func copyToDescriptor(ctx context.Context, source io.ReadCloser, descriptor int, duplicate func(int) (int, error)) (duplicateDescriptor int, result error) {
+	duplicateDescriptor, destination, err := duplicateDestination(descriptor, duplicate)
+	if err != nil {
+		_ = source.Close()
+		return duplicateDescriptor, err
+	}
+	defer destination.Close()
 	if err := destination.Truncate(0); err != nil {
+		_ = source.Close()
 		return duplicateDescriptor, err
 	}
 	if _, err := destination.Seek(0, io.SeekStart); err != nil {
+		_ = source.Close()
 		return duplicateDescriptor, err
 	}
-	_, copyErr := io.Copy(destination, source)
-	sourceCloseErr := source.Close()
-	sourceClosed = true
-	syncErr := destination.Sync()
-	destinationCloseErr := destination.Close()
-	destinationClosed = true
-	if copyErr != nil {
-		return duplicateDescriptor, copyErr
+	if err := copyWithCancellation(ctx, destination, source, nil); err != nil {
+		return duplicateDescriptor, err
 	}
-	if sourceCloseErr != nil {
-		return duplicateDescriptor, sourceCloseErr
+	if err := destination.Sync(); err != nil {
+		return duplicateDescriptor, err
 	}
-	if syncErr != nil {
-		return duplicateDescriptor, syncErr
+	return duplicateDescriptor, nil
+}
+
+func copyRangeToDescriptor(ctx context.Context, source io.ReadCloser, descriptor int, offset, length int64, duplicate func(int) (int, error)) (duplicateDescriptor int, result error) {
+	duplicateDescriptor, destination, err := duplicateDestination(descriptor, duplicate)
+	if err != nil {
+		_ = source.Close()
+		return duplicateDescriptor, err
 	}
-	if destinationCloseErr != nil {
-		return duplicateDescriptor, destinationCloseErr
+	defer destination.Close()
+	// File Provider partial temp files preserve source offsets but end at the
+	// retrieved range; fileproviderd rejects a trailing hole to the source EOF.
+	if err := destination.Truncate(offset + length); err != nil {
+		_ = source.Close()
+		return duplicateDescriptor, err
+	}
+	if _, err := destination.Seek(offset, io.SeekStart); err != nil {
+		_ = source.Close()
+		return duplicateDescriptor, err
+	}
+	if err := copyWithCancellation(ctx, destination, source, &length); err != nil {
+		return duplicateDescriptor, err
+	}
+	if err := destination.Sync(); err != nil {
+		return duplicateDescriptor, err
 	}
 	return duplicateDescriptor, nil
 }

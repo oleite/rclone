@@ -76,6 +76,12 @@ open `FileHandle` over XPC. The Agent passes that descriptor to the Go bridge;
 Go duplicates it and owns only the duplicate. No destination pathname crosses
 the XPC boundary.
 
+Partial hydration uses Apple's aligned requested range, a DATA-XPC operation
+identifier, and `fs.RangeOption`. Go sizes the temporary file to the retrieved
+range end, seeks to the retrieved offset, and writes only that exact range so a
+prefix before a nonzero offset stays sparse. Full and partial fetches use private cancellable
+transfer handles; cancellation closes an active source reader.
+
 CloudMount does not import or instantiate `vfs.VFS`. Some registered backends may
 use VFS internally as their own implementation detail. Phase 2A uses temporary
 path-derived identifiers and full-directory `List`, and does not provide writes,

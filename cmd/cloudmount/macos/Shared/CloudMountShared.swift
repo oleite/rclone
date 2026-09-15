@@ -13,9 +13,20 @@ import Foundation
     func fetchContents(
         domainIdentifier: String,
         path: String,
+        operationIdentifier: String,
         fileHandle: FileHandle,
         reply: @escaping (NSError?) -> Void
     )
+    func fetchPartialContents(
+        domainIdentifier: String,
+        path: String,
+        operationIdentifier: String,
+        offset: Int64,
+        length: Int64,
+        fileHandle: FileHandle,
+        reply: @escaping (NSError?) -> Void
+    )
+    func cancelFetch(domainIdentifier: String, operationIdentifier: String, reply: @escaping () -> Void)
 }
 
 struct CloudMountMetadata: Codable {
