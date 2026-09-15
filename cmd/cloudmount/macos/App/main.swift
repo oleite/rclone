@@ -8,7 +8,7 @@ enum ControlError: Error, CustomStringConvertible {
 
     var description: String {
         switch self {
-        case .usage: return "usage: RcloneCloudMount <agent-register|agent-unregister|agent-status|agent-ping|domain-add-test|domain-list|domain-remove-test>"
+        case .usage: return "usage: RcloneCloudMount <agent-register|agent-unregister|agent-status|agent-ping|domain-list|domain-remove-test> | domain-add-test <remote:path>"
         case .operation(let message): return message
         }
     }
@@ -30,11 +30,12 @@ func waitForResult<T>(_ body: (@escaping (T?, Error?) -> Void) -> Void) throws -
     return result
 }
 
-func domain() -> NSFileProviderDomain {
+func domain(remote: String? = nil) -> NSFileProviderDomain {
     let domain = NSFileProviderDomain(
         identifier: NSFileProviderDomainIdentifier(CloudMountConstants.domainIdentifier),
         displayName: CloudMountConstants.domainDisplayName
     )
+    if #available(macOS 15.0, *), let remote { domain.userInfo = [CloudMountConstants.remoteUserInfoKey: remote] }
 #if CLOUDMOUNT_FILE_PROVIDER_TESTING_MODE
     domain.testingModes = [.alwaysEnabled]
 #endif
@@ -52,8 +53,9 @@ func agentStatusText(_ status: SMAppService.Status) -> String {
 }
 
 func run() throws {
-    guard CommandLine.arguments.count == 2 else { throw ControlError.usage }
+    guard CommandLine.arguments.count >= 2 else { throw ControlError.usage }
     let command = CommandLine.arguments[1]
+    guard command == "domain-add-test" || CommandLine.arguments.count == 2 else { throw ControlError.usage }
     let service = SMAppService.agent(plistName: agentPlistName)
 
     switch command {
@@ -95,8 +97,11 @@ func run() throws {
         guard response == "pong" else { throw ControlError.operation("unexpected ping reply: \(response ?? "nil")") }
         print("pong")
     case "domain-add-test":
+        guard CommandLine.arguments.count == 3 else { throw ControlError.usage }
+        let remote = CommandLine.arguments[2]
+        guard !remote.isEmpty else { throw ControlError.usage }
         try waitForResult { completion in
-            NSFileProviderManager.add(domain(), completionHandler: { completion((), $0) })
+            NSFileProviderManager.add(domain(remote: remote), completionHandler: { completion((), $0) })
         } as Void?
         print("domain added: \(CloudMountConstants.domainIdentifier)")
     case "domain-list":
@@ -104,7 +109,8 @@ func run() throws {
             NSFileProviderManager.getDomainsWithCompletionHandler { completion($0, $1) }
         } ?? []
         for value in domains {
-            print("identifier=\(value.identifier.rawValue) displayName=\(value.displayName) userEnabled=\(value.userEnabled)")
+            let configured = if #available(macOS 15.0, *) { value.userInfo?[CloudMountConstants.remoteUserInfoKey] as? String != nil } else { false }
+            print("identifier=\(value.identifier.rawValue) displayName=\(value.displayName) userEnabled=\(value.userEnabled) remoteConfigured=\(configured)")
         }
     case "domain-remove-test":
         try waitForResult { completion in

@@ -2,19 +2,29 @@ import Foundation
 
 @objc protocol CloudMountAgentProtocol {
     func ping(reply: @escaping (String) -> Void)
-    func writeSyntheticContent(
-        itemIdentifier: String,
+    func listDirectory(remote: String, path: String, reply: @escaping (String?, NSError?) -> Void)
+    func statItem(remote: String, path: String, isDirectory: Bool, reply: @escaping (String?, NSError?) -> Void)
+    func fetchContents(
+        remote: String,
+        path: String,
         destinationPath: String,
         reply: @escaping (NSError?) -> Void
     )
 }
 
+struct CloudMountMetadata: Codable {
+    let path: String; let filename: String; let isDirectory: Bool; let size: Int64?
+    let modificationTime: String?; let backendID: String?; let version: String
+}
+struct CloudMountBridgeError: Codable { let code: String; let message: String }
+struct CloudMountBridgeResponse: Codable {
+    let ok: Bool; let items: [CloudMountMetadata]?; let item: CloudMountMetadata?; let error: CloudMountBridgeError?
+}
+
 enum CloudMountConstants {
-    static let domainIdentifier = "org.rclone.cloudmount.synthetic-test"
+    static let domainIdentifier = "org.rclone.cloudmount.test"
     static let domainDisplayName = "Rclone CloudMount Test"
-    static let helloIdentifier = "synthetic-hello"
-    static let helloFilename = "hello.txt"
-    static let syntheticContents = "Hello from rclone cloudmount agent\n"
+    static let remoteUserInfoKey = "rcloneRemote"
 
     static var machServiceName: String {
         infoString("CloudMountMachService")

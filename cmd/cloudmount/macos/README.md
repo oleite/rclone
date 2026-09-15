@@ -1,7 +1,9 @@
 # Rclone CloudMount macOS development shell
 
-This optional Xcode project proves the native File Provider to LaunchAgent path for
-CloudMount. It does not contain the rclone engine and is not part of normal Go builds.
+This optional Xcode project implements the native File Provider to LaunchAgent path
+for CloudMount. The LaunchAgent alone links the dedicated `librclone/cloudmount`
+C archive; the app and File Provider do not contain the Go runtime. Normal rclone
+Go builds remain independent of Xcode.
 
 ## Local configuration
 
@@ -26,7 +28,7 @@ APP="$HOME/Applications/RcloneCloudMount.app"
 "$APP/Contents/MacOS/RcloneCloudMount" agent-register
 "$APP/Contents/MacOS/RcloneCloudMount" agent-status
 "$APP/Contents/MacOS/RcloneCloudMount" agent-ping
-"$APP/Contents/MacOS/RcloneCloudMount" domain-add-test
+"$APP/Contents/MacOS/RcloneCloudMount" domain-add-test /absolute/path/to/test/root
 "$APP/Contents/MacOS/RcloneCloudMount" domain-list
 ```
 
@@ -46,14 +48,23 @@ with a Personal Team, set `CLOUDMOUNT_APP_DEBUG_ENTITLEMENTS` to
 `CLOUDMOUNT_TESTING_MODE_SWIFT_CONDITION` in `Local.xcconfig`. This selects normal
 user-enabled behavior without changing Release configuration.
 
-The fixed test domain is `org.rclone.cloudmount.synthetic-test`, displayed as
-`Rclone CloudMount Test`. Its read-only `hello.txt` is populated by the agent with:
+The fixed development domain is `org.rclone.cloudmount.test`, displayed as
+`Rclone CloudMount Test`. `domain-add-test` stores the selected rclone root in the
+domain's `userInfo`; it does not store credentials or an rclone configuration.
+
+The read-only data path is direct:
 
 ```text
-Hello from rclone cloudmount agent
+File Provider -> authenticated XPC -> Agent -> fs/cache.Get
+              -> fs.Fs.List / fs.Fs.NewObject -> fs.Object.Open
 ```
 
-Inspect the agent's unified log when validating the writer:
+CloudMount does not import or instantiate `vfs.VFS`. Some registered backends may
+use VFS internally as their own implementation detail. Phase 2A uses temporary
+path-derived identifiers and full-directory `List`, and does not provide writes,
+partial fetching, Go transfer cancellation, or remote-change synchronization.
+
+Inspect the unified log when validating List, Stat, and Fetch operations:
 
 ```sh
 log show --last 5m --predicate 'subsystem == "org.rclone.cloudmount"' --style compact
