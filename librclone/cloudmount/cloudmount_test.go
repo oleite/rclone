@@ -126,6 +126,51 @@ func TestDuplicateClosedAfterFailure(t *testing.T) {
 	}
 }
 
+func TestFullCopyExactLength(t *testing.T) {
+	destination, err := os.CreateTemp(t.TempDir(), "full-exact")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	content := "exact full content"
+	if _, err := copyFullToDescriptor(context.Background(), io.NopCloser(strings.NewReader(content)), int(destination.Fd()), int64(len(content)), unix.Dup); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := destination.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("caller descriptor was closed: %v", err)
+	}
+	got, err := io.ReadAll(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != content {
+		t.Fatalf("content = %q", got)
+	}
+}
+
+func TestFullCopyPrematureEOFFailsAndClosesDuplicate(t *testing.T) {
+	destination, err := os.CreateTemp(t.TempDir(), "full-short")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer destination.Close()
+	captured := -1
+	duplicate := func(fd int) (int, error) { value, err := unix.Dup(fd); captured = value; return value, err }
+	_, err = copyFullToDescriptor(context.Background(), io.NopCloser(strings.NewReader("short")), int(destination.Fd()), 10, duplicate)
+	if !errors.Is(err, errShortFullRead) {
+		t.Fatalf("error = %v", err)
+	}
+	if errorCode(err) != "short_full_read" {
+		t.Fatalf("error code = %q", errorCode(err))
+	}
+	if _, err := unix.FcntlInt(uintptr(captured), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+		t.Fatalf("duplicated descriptor remains open: %v", err)
+	}
+	if _, err := destination.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("caller descriptor was closed: %v", err)
+	}
+}
+
 func rangeFixture(t *testing.T) (string, []byte) {
 	t.Helper()
 	data := make([]byte, 16384)
@@ -231,7 +276,7 @@ func TestTransferCancellationClosesSource(t *testing.T) {
 	defer destination.Close()
 	baseline := runtime.NumGoroutine()
 	result := make(chan error, 1)
-	go func() { _, err := copyToDescriptor(ctx, reader, int(destination.Fd()), unix.Dup); result <- err }()
+	go func() { _, err := copyFullToDescriptor(ctx, reader, int(destination.Fd()), 1, unix.Dup); result <- err }()
 	registry.cancel(id)
 	select {
 	case err := <-result:

@@ -21,6 +21,7 @@ import (
 
 var (
 	errInvalidRange    = errors.New("invalid range")
+	errShortFullRead   = errors.New("short full read")
 	errShortRangeRead  = errors.New("short range read")
 	errInvalidTransfer = errors.New("invalid transfer handle")
 )
@@ -51,6 +52,8 @@ func errorCode(err error) string {
 		return "cancelled"
 	case errors.Is(err, errInvalidRange):
 		return "invalid_range"
+	case errors.Is(err, errShortFullRead):
+		return "short_full_read"
 	case errors.Is(err, errShortRangeRead):
 		return "short_range_read"
 	case errors.Is(err, errInvalidTransfer):
@@ -174,7 +177,7 @@ func fetchFD(ctx context.Context, remote, remotePath string, descriptor int) bri
 	if err != nil {
 		return failure(err)
 	}
-	if _, err := copyToDescriptor(ctx, source, descriptor, unix.Dup); err != nil {
+	if _, err := copyFullToDescriptor(ctx, source, descriptor, object.Size(), unix.Dup); err != nil {
 		return failure(err)
 	}
 	return bridgeResponse{OK: true}
@@ -216,7 +219,7 @@ func (source *onceReadCloser) Close() error {
 	return err
 }
 
-func copyWithCancellation(ctx context.Context, destination io.Writer, source io.ReadCloser, length *int64) error {
+func copyWithCancellation(ctx context.Context, destination io.Writer, source io.ReadCloser, length *int64, shortReadError error) error {
 	closer := &onceReadCloser{source: source}
 	done := make(chan struct{})
 	go func() {
@@ -232,7 +235,7 @@ func copyWithCancellation(ctx context.Context, destination io.Writer, source io.
 	} else {
 		written, err := io.CopyN(destination, closer, *length)
 		if err != nil || written != *length {
-			copyErr = errShortRangeRead
+			copyErr = shortReadError
 		}
 	}
 	close(done)
@@ -260,6 +263,17 @@ func duplicateDestination(descriptor int, duplicate func(int) (int, error)) (int
 }
 
 func copyToDescriptor(ctx context.Context, source io.ReadCloser, descriptor int, duplicate func(int) (int, error)) (duplicateDescriptor int, result error) {
+	return copyToDescriptorWithSize(ctx, source, descriptor, nil, duplicate)
+}
+
+func copyFullToDescriptor(ctx context.Context, source io.ReadCloser, descriptor int, size int64, duplicate func(int) (int, error)) (duplicateDescriptor int, result error) {
+	if size < 0 {
+		return copyToDescriptor(ctx, source, descriptor, duplicate)
+	}
+	return copyToDescriptorWithSize(ctx, source, descriptor, &size, duplicate)
+}
+
+func copyToDescriptorWithSize(ctx context.Context, source io.ReadCloser, descriptor int, size *int64, duplicate func(int) (int, error)) (duplicateDescriptor int, result error) {
 	duplicateDescriptor, destination, err := duplicateDestination(descriptor, duplicate)
 	if err != nil {
 		_ = source.Close()
@@ -274,7 +288,7 @@ func copyToDescriptor(ctx context.Context, source io.ReadCloser, descriptor int,
 		_ = source.Close()
 		return duplicateDescriptor, err
 	}
-	if err := copyWithCancellation(ctx, destination, source, nil); err != nil {
+	if err := copyWithCancellation(ctx, destination, source, size, errShortFullRead); err != nil {
 		return duplicateDescriptor, err
 	}
 	if err := destination.Sync(); err != nil {
@@ -300,7 +314,7 @@ func copyRangeToDescriptor(ctx context.Context, source io.ReadCloser, descriptor
 		_ = source.Close()
 		return duplicateDescriptor, err
 	}
-	if err := copyWithCancellation(ctx, destination, source, &length); err != nil {
+	if err := copyWithCancellation(ctx, destination, source, &length, errShortRangeRead); err != nil {
 		return duplicateDescriptor, err
 	}
 	if err := destination.Sync(); err != nil {

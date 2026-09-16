@@ -49,6 +49,7 @@ private func sanitizedResult(_ result: String) -> String {
     case "not_found": message = "item not found"
     case "cancelled": message = "transfer cancelled"
     case "invalid_range": message = "invalid byte range"
+    case "short_full_read": message = "incomplete file content"
     case "short_range_read": message = "incomplete byte range"
     default: message = "backend operation failed"
     }
