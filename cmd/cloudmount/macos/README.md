@@ -76,16 +76,40 @@ open `FileHandle` over XPC. The Agent passes that descriptor to the Go bridge;
 Go duplicates it and owns only the duplicate. No destination pathname crosses
 the XPC boundary.
 
-Partial hydration uses Apple's aligned requested range, a DATA-XPC operation
+## Hydration baseline
+
+The production extension advertises only `NSFileProviderReplicatedExtension` and
+uses `fetchContents` for cold content. Full-only hydration is a temporary
+correctness fallback: runtime tests found application-visible POSIX `ETIMEDOUT`
+during implicit partial-to-full escalation, although ranged transport returned
+correct bytes. The underlying runtime cause remains unresolved. Random reads and
+media seeks therefore download the whole file before useful content access.
+
+The partial implementation remains compiled in `FileProviderExtension.swift`;
+there is no public hydration switch or separate duplicated implementation.
+Future experiments can intentionally restore `NSFileProviderPartialContentFetching`
+conformance and revise the production capability guard, but must independently
+validate the lifecycle before changing the default.
+
+The retained partial implementation uses Apple's aligned requested range, a DATA-XPC operation
 identifier, and `fs.RangeOption`. Go sizes the temporary file to the retrieved
 range end, seeks to the retrieved offset, and writes only that exact range so a
 prefix before a nonzero offset stays sparse. Full and partial fetches use private cancellable
 transfer handles; cancellation closes an active source reader.
 
 CloudMount does not import or instantiate `vfs.VFS`. Some registered backends may
-use VFS internally as their own implementation detail. Phase 2A uses temporary
-path-derived identifiers and full-directory `List`, and does not provide writes,
-partial fetching, Go transfer cancellation, or remote-change synchronization.
+use VFS internally as their own implementation detail. The prototype uses temporary
+path-derived identifiers and full-directory `List`, and does not provide writes
+or remote-change synchronization.
+
+Run the native capability, range-alignment, and domain-store tests with:
+
+```sh
+cmd/cloudmount/macos/Scripts/test-file-provider.sh
+```
+
+The capability test checks Objective-C protocol advertisement on the actual
+extension class; compiling it also checks the retained partial implementation.
 
 Inspect the unified log when validating List, Stat, and Fetch operations:
 

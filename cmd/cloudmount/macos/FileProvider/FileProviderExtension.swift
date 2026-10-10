@@ -5,7 +5,11 @@ import os
 private let logger = Logger(subsystem: "org.rclone.cloudmount", category: "file-provider")
 private final class OneShotCompletion { private let lock = NSLock(); private var completed = false; func run(_ action: () -> Void) { lock.lock(); guard !completed else { lock.unlock(); return }; completed = true; lock.unlock(); action() } }
 
-final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, NSFileProviderPartialContentFetching {
+// Partial hydration is intentionally not advertised. Ranged transport is byte-correct,
+// but runtime tests found application-visible ETIMEDOUT during partial -> implicit
+// full escalation. Full-only hydration is the temporary correctness baseline;
+// the partial implementation remains compiled for future lifecycle investigation.
+final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     private let domain: NSFileProviderDomain
     private var domainIdentifier: String { domain.identifier.rawValue }
     required init(domain: NSFileProviderDomain) { self.domain = domain; super.init() }
