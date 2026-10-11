@@ -14,8 +14,8 @@ The local file is ignored by git. The macOS deployment target is 13.0.
 CloudMount uses the macOS Team-ID App Group form
 `<Developer-Team-ID>.org.rclone.cloudmount`, not a registered `group.*` App Group.
 The committed unsigned-build placeholder is `TEAMID`; `Local.xcconfig` maps
-`CLOUDMOUNT_TEAM_ID` to `DEVELOPMENT_TEAM`. The Mach service appends `.agent` to
-the resulting App Group identifier.
+`CLOUDMOUNT_TEAM_ID` to `DEVELOPMENT_TEAM`. The Mach services append
+`.agent.control` and `.agent.data` to the resulting App Group identifier.
 
 Build the `RcloneCloudMount` scheme in Debug with automatic signing. For stable
 runtime registration, copy the result to `~/Applications/RcloneCloudMount.app`
@@ -51,8 +51,8 @@ user-enabled behavior without changing Release configuration.
 The fixed development domain is `org.rclone.cloudmount.test`, displayed as
 `Rclone CloudMount Test`. `domain-add-test` first stores the domain-to-remote
 mapping in the LaunchAgent and then registers a plain File Provider domain. The
-File Provider receives only the domain identifier and relative paths; it never
-receives or stores the rclone remote selector.
+File Provider receives opaque item/parent identifiers and item metadata; it never
+receives or stores backend-relative paths or the rclone remote selector.
 
 The LaunchAgent persists its versioned mapping in
 `~/Library/Application Support/Rclone CloudMount/domains.json`. The directory is
@@ -98,11 +98,66 @@ prefix before a nonzero offset stays sparse. Full and partial fetches use privat
 transfer handles; cancellation closes an active source reader.
 
 CloudMount does not import or instantiate `vfs.VFS`. Some registered backends may
-use VFS internally as their own implementation detail. The prototype uses temporary
-path-derived identifiers and full-directory `List`, and does not provide writes
-or remote-change synchronization.
+use VFS internally as their own implementation detail. Directory enumeration uses
+full-directory `List`; CloudMount does not provide writes or remote-change synchronization.
 
-Run the native capability, range-alignment, and domain-store tests with:
+## Persistent identities
+
+The Agent owns `~/Library/Application Support/Rclone CloudMount/catalog.sqlite3`,
+with private directory/file permissions (`0700`/`0600`). Apple SQLite is the only
+database dependency. One locked connection uses transactional directory
+reconciliation, unique `(domain, identifier)` and `(domain, path)` constraints,
+and domain-scoped parent foreign keys. Absent directories delete their catalog
+subtree. Successful same-path/same-kind discovery retains its identity.
+
+Non-root IDs are canonical lowercase `i-<UUID>` values, independent of pathname
+and type. Root remains Apple's `.rootContainer`; it has no artificial catalog
+UUID. DATA List accepts a parent ID; Stat and Fetch accept an item ID. Only the
+Agent resolves IDs to backend paths before calling the existing Go bridge.
+Malformed, unknown, legacy path-derived and cross-domain IDs fail as `noSuchItem`.
+
+Schema version 1 initializes a fresh empty database transactionally. A newer,
+corrupt or structurally invalid catalog fails closed; it is not silently reset.
+The catalog stores relative paths, metadata, stable parent IDs, optional backend
+IDs, separate versions and created/last-seen timestamps—not selectors, credentials
+or file content. A domain binding hashes its configured selector. Changing the
+mapping retires old IDs; configuring the same selector preserves them.
+
+The Agent serializes mapping/catalog work with configuration changes, but backend
+I/O remains concurrent. Domain-generation snapshots are validated before catalog
+commits and successful transfer replies, rejecting stale completions after remapping
+or remove/re-add. Discovery of the same directory is ordered within a binding
+generation so an older observation cannot retire IDs returned by a newer one;
+unrelated directories and transfers remain concurrent. Configuration writes JSON
+before rebinding SQLite; removal purges
+SQLite before removing JSON. Every DATA operation validates the binding before
+resolving an ID. A crash between these stores cannot apply old identities to a new remote;
+an interrupted removal may retain a mapping but its old identities are gone.
+
+Content versions hash kind/size/mtime, without pathname. Metadata versions also
+hash filename and stable parent ID. They are best-effort metadata observations,
+not content hashes: equal size/mtime can hide content changes. Backend IDs are
+recorded only as optional evidence, never assumed globally unique or rename-stable.
+
+Known-continuity catalog moves update paths and directory descendants atomically
+while retaining IDs. This does not expose a File Provider rename/write operation.
+External rename continuity is conservatively delete/create until demonstrated
+backend IDs support it. SMB fixture entries provided no backend IDs.
+
+Upgrade from the path-ID prototype requires development-domain recreation:
+run `domain-remove-test` with the old installed app, update the app, and then
+`domain-add-test <test-root>` with the new app. Old IDs are never reinterpreted as
+paths, and CloudMount never modifies Apple's private File Provider database.
+
+`enumerateChanges` remains a limited no-op with a constant anchor; signaling an
+enumerator is not remote-change synchronization. A direct provider enumeration
+reconciles the catalog, but cached Finder namespaces may require domain recreation
+to discover external changes in this development phase. No polling/journal is added.
+Before simultaneous CloudMount domains, data-plane authorization must also bind a
+provider domain to the domain identifier it is permitted to submit; catalog lookup
+isolation alone does not provide that authorization.
+
+Run native identity/catalog, lifecycle, capability, range and domain-store tests with:
 
 ```sh
 cmd/cloudmount/macos/Scripts/test-file-provider.sh

@@ -8,18 +8,18 @@ import Foundation
 }
 
 @objc protocol CloudMountDataProtocol {
-    func listDirectory(domainIdentifier: String, path: String, reply: @escaping (String?, NSError?) -> Void)
-    func statItem(domainIdentifier: String, path: String, isDirectory: Bool, reply: @escaping (String?, NSError?) -> Void)
+    func listDirectory(domainIdentifier: String, parentIdentifier: String, reply: @escaping (String?, NSError?) -> Void)
+    func statItem(domainIdentifier: String, itemIdentifier: String, reply: @escaping (String?, NSError?) -> Void)
     func fetchContents(
         domainIdentifier: String,
-        path: String,
+        itemIdentifier: String,
         operationIdentifier: String,
         fileHandle: FileHandle,
         reply: @escaping (NSError?) -> Void
     )
     func fetchPartialContents(
         domainIdentifier: String,
-        path: String,
+        itemIdentifier: String,
         operationIdentifier: String,
         offset: Int64,
         length: Int64,
@@ -36,6 +36,34 @@ struct CloudMountMetadata: Codable {
 struct CloudMountBridgeError: Codable { let code: String; let message: String }
 struct CloudMountBridgeResponse: Codable {
     let ok: Bool; let items: [CloudMountMetadata]?; let item: CloudMountMetadata?; let error: CloudMountBridgeError?
+}
+
+enum CloudMountItemIdentifier {
+    static let root = "NSFileProviderRootContainerItemIdentifier"
+    static func make() -> String { "i-" + UUID().uuidString.lowercased() }
+    static func isValid(_ value: String) -> Bool {
+        guard value.hasPrefix("i-"), let uuid = UUID(uuidString: String(value.dropFirst(2))) else { return false }
+        return value == "i-" + uuid.uuidString.lowercased()
+    }
+}
+
+// DATA responses deliberately exclude backend-relative paths and selectors.
+struct CloudMountItemMetadata: Codable {
+    let itemIdentifier: String
+    let parentIdentifier: String
+    let filename: String
+    let isDirectory: Bool
+    let size: Int64?
+    let modificationTime: String?
+    let contentVersion: String
+    let metadataVersion: String
+}
+
+struct CloudMountItemResponse: Codable {
+    let ok: Bool
+    let items: [CloudMountItemMetadata]?
+    let item: CloudMountItemMetadata?
+    let error: CloudMountBridgeError?
 }
 
 enum CloudMountConstants {

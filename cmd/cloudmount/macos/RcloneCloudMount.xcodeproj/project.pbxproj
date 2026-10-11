@@ -22,6 +22,8 @@
 		10000000000000000000000E /* Agent executable embed */ = {isa = PBXBuildFile; fileRef = 300000000000000000000003 /* RcloneCloudMountAgent */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		10000000000000000000000F /* DomainConfigurationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* DomainConfigurationStore.swift */; };
 		100000000000000000000010 /* RangeAlignment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* RangeAlignment.swift */; };
+		100000000000000000000011 /* ItemCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015; };
+		100000000000000000000012 /* DomainCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000016; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -58,6 +60,8 @@
 		300000000000000000000001 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RcloneCloudMount.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		300000000000000000000002 = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = RcloneCloudMountFileProvider.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		300000000000000000000003 = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = RcloneCloudMountAgent; sourceTree = BUILT_PRODUCTS_DIR; };
+		200000000000000000000015 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ItemCatalog.swift; sourceTree = "<group>"; };
+		200000000000000000000016 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DomainCatalog.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -70,7 +74,7 @@
 		900000000000000000000001 = {isa = PBXGroup; children = (900000000000000000000002, 900000000000000000000003, 900000000000000000000004, 900000000000000000000005, 900000000000000000000006, 900000000000000000000007, 900000000000000000000008, ); sourceTree = "<group>"; };
 		900000000000000000000002 = {isa = PBXGroup; children = (200000000000000000000001, 200000000000000000000006, 20000000000000000000000C, 200000000000000000000012, ); path = App; sourceTree = "<group>"; };
 		900000000000000000000003 = {isa = PBXGroup; children = (200000000000000000000003, 200000000000000000000004, 200000000000000000000005, 200000000000000000000014, 20000000000000000000000D, 20000000000000000000000E, 200000000000000000000008, ); path = FileProvider; sourceTree = "<group>"; };
-		900000000000000000000004 = {isa = PBXGroup; children = (200000000000000000000007, 200000000000000000000013, ); path = Agent; sourceTree = "<group>"; };
+		900000000000000000000004 = {isa = PBXGroup; children = (200000000000000000000007, 200000000000000000000013, 200000000000000000000015, 200000000000000000000016, ); path = Agent; sourceTree = "<group>"; };
 		900000000000000000000005 = {isa = PBXGroup; children = (200000000000000000000002, ); path = Shared; sourceTree = "<group>"; };
 		900000000000000000000006 = {isa = PBXGroup; children = (20000000000000000000000F, 200000000000000000000010, ); path = Config; sourceTree = "<group>"; };
 		900000000000000000000007 = {isa = PBXGroup; children = (200000000000000000000011, ); path = Resources; sourceTree = "<group>"; };
@@ -95,7 +99,7 @@
 /* Begin PBXSourcesBuildPhase section */
 		B00000000000000000000001 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000001, 100000000000000000000002, ); runOnlyForDeploymentPostprocessing = 0; };
 		B00000000000000000000002 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000003, 100000000000000000000004, 100000000000000000000005, 100000000000000000000006, 100000000000000000000010, ); runOnlyForDeploymentPostprocessing = 0; };
-		B00000000000000000000003 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000007, 100000000000000000000008, 10000000000000000000000F, ); runOnlyForDeploymentPostprocessing = 0; };
+		B00000000000000000000003 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000007, 100000000000000000000008, 10000000000000000000000F, 100000000000000000000011, 100000000000000000000012, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -110,8 +114,8 @@
 		D00000000000000000000012 = {isa = XCBuildConfiguration; baseConfigurationReference = 20000000000000000000000F; buildSettings = {CODE_SIGN_ENTITLEMENTS = App/RcloneCloudMount.entitlements; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = App/Info.plist; PRODUCT_BUNDLE_IDENTIFIER = "$(CLOUDMOUNT_BUNDLE_ID)"; PRODUCT_NAME = "$(TARGET_NAME)"; }; name = Release; };
 		D00000000000000000000021 = {isa = XCBuildConfiguration; baseConfigurationReference = 20000000000000000000000F; buildSettings = {CODE_SIGN_ENTITLEMENTS = FileProvider/FileProviderDebug.entitlements; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = FileProvider/Info.plist; PRODUCT_BUNDLE_IDENTIFIER = "$(CLOUDMOUNT_BUNDLE_ID).FileProvider"; PRODUCT_NAME = "$(TARGET_NAME)"; SKIP_INSTALL = YES; }; name = Debug; };
 		D00000000000000000000022 = {isa = XCBuildConfiguration; baseConfigurationReference = 20000000000000000000000F; buildSettings = {CODE_SIGN_ENTITLEMENTS = FileProvider/FileProvider.entitlements; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = FileProvider/Info.plist; PRODUCT_BUNDLE_IDENTIFIER = "$(CLOUDMOUNT_BUNDLE_ID).FileProvider"; PRODUCT_NAME = "$(TARGET_NAME)"; SKIP_INSTALL = YES; }; name = Release; };
-		D00000000000000000000031 = {isa = XCBuildConfiguration; baseConfigurationReference = 20000000000000000000000F; buildSettings = {CREATE_INFOPLIST_SECTION_IN_BINARY = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Agent/Info.plist; OTHER_LDFLAGS = ("$(inherited)", "$(DERIVED_FILE_DIR)/librclone_cloudmount.a", "-lresolv", ); PRODUCT_BUNDLE_IDENTIFIER = "$(CLOUDMOUNT_AGENT_LABEL)"; PRODUCT_NAME = "$(TARGET_NAME)"; SKIP_INSTALL = YES; SWIFT_OBJC_BRIDGING_HEADER = Agent/RcloneCloudMountAgent-Bridging-Header.h; }; name = Debug; };
-		D00000000000000000000032 = {isa = XCBuildConfiguration; baseConfigurationReference = 20000000000000000000000F; buildSettings = {CREATE_INFOPLIST_SECTION_IN_BINARY = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Agent/Info.plist; OTHER_LDFLAGS = ("$(inherited)", "$(DERIVED_FILE_DIR)/librclone_cloudmount.a", "-lresolv", ); PRODUCT_BUNDLE_IDENTIFIER = "$(CLOUDMOUNT_AGENT_LABEL)"; PRODUCT_NAME = "$(TARGET_NAME)"; SKIP_INSTALL = YES; SWIFT_OBJC_BRIDGING_HEADER = Agent/RcloneCloudMountAgent-Bridging-Header.h; }; name = Release; };
+		D00000000000000000000031 = {isa = XCBuildConfiguration; baseConfigurationReference = 20000000000000000000000F; buildSettings = {CREATE_INFOPLIST_SECTION_IN_BINARY = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Agent/Info.plist; OTHER_LDFLAGS = ("$(inherited)", "$(DERIVED_FILE_DIR)/librclone_cloudmount.a", "-lresolv", "-lsqlite3", ); PRODUCT_BUNDLE_IDENTIFIER = "$(CLOUDMOUNT_AGENT_LABEL)"; PRODUCT_NAME = "$(TARGET_NAME)"; SKIP_INSTALL = YES; SWIFT_OBJC_BRIDGING_HEADER = Agent/RcloneCloudMountAgent-Bridging-Header.h; }; name = Debug; };
+		D00000000000000000000032 = {isa = XCBuildConfiguration; baseConfigurationReference = 20000000000000000000000F; buildSettings = {CREATE_INFOPLIST_SECTION_IN_BINARY = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Agent/Info.plist; OTHER_LDFLAGS = ("$(inherited)", "$(DERIVED_FILE_DIR)/librclone_cloudmount.a", "-lresolv", "-lsqlite3", ); PRODUCT_BUNDLE_IDENTIFIER = "$(CLOUDMOUNT_AGENT_LABEL)"; PRODUCT_NAME = "$(TARGET_NAME)"; SKIP_INSTALL = YES; SWIFT_OBJC_BRIDGING_HEADER = Agent/RcloneCloudMountAgent-Bridging-Header.h; }; name = Release; };
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */

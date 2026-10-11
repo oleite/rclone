@@ -8,6 +8,11 @@ private let configurationStore: DomainConfigurationStore = {
     catch { fatalError("unable to locate CloudMount configuration store: \(error.localizedDescription)") }
 }()
 
+private let domainCatalog: DomainCatalog = {
+    do { return DomainCatalog(configuration: configurationStore, catalog: try ItemCatalog.applicationSupportCatalog()) }
+    catch { fatalError("unable to open CloudMount item catalog") }
+}()
+
 private func infoString(_ key: String) -> String {
     guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String, !value.isEmpty else {
         fatalError("\(key) is missing from Info.plist")
@@ -97,14 +102,14 @@ private final class ControlService: NSObject, CloudMountControlProtocol {
 
     func configureDomain(domainIdentifier: String, remote: String, reply: @escaping (NSError?) -> Void) {
         backendQueue.async {
-            do { try configurationStore.configure(domainIdentifier: domainIdentifier, remote: remote); logger.notice("configured domain \(domainIdentifier, privacy: .public)"); reply(nil) }
+            do { try domainCatalog.configure(domain: domainIdentifier, remote: remote); logger.notice("configured domain \(domainIdentifier, privacy: .public)"); reply(nil) }
             catch { logger.error("failed to configure domain \(domainIdentifier, privacy: .public): \(error.localizedDescription, privacy: .private)"); reply(self.storeError(error)) }
         }
     }
 
     func removeDomainConfiguration(domainIdentifier: String, reply: @escaping (NSError?) -> Void) {
         backendQueue.async {
-            do { try configurationStore.remove(domainIdentifier: domainIdentifier); logger.notice("removed domain configuration \(domainIdentifier, privacy: .public)"); reply(nil) }
+            do { try domainCatalog.remove(domain: domainIdentifier); logger.notice("removed domain configuration \(domainIdentifier, privacy: .public)"); reply(nil) }
             catch { logger.error("failed to remove domain configuration \(domainIdentifier, privacy: .public): \(error.localizedDescription, privacy: .private)"); reply(self.storeError(error)) }
         }
     }
@@ -118,33 +123,66 @@ private final class ControlService: NSObject, CloudMountControlProtocol {
 }
 
 private final class DataService: NSObject, CloudMountDataProtocol {
-    private func storeError(_ error: Error) -> NSError { error as NSError }
+    private func storeError(_ error: Error) -> NSError {
+        let missing = (error as? ItemCatalogError) == .noSuchItem
+        return NSError(domain: "org.rclone.cloudmount", code: missing ? 404 : 2,
+                       userInfo: [NSLocalizedDescriptionKey: missing ? "item not found" : "backend operation failed"])
+    }
 
-    func listDirectory(domainIdentifier: String, path: String, reply: @escaping (String?, NSError?) -> Void) {
+    private func itemResult(_ raw: String, transform: (CloudMountBridgeResponse) throws -> CloudMountItemResponse) throws -> String {
+        let sanitized = sanitizedResult(raw)
+        guard let data = sanitized.data(using: .utf8) else { throw ItemCatalogError.database }
+        let response = try JSONDecoder().decode(CloudMountBridgeResponse.self, from: data)
+        let result = response.ok ? try transform(response) : CloudMountItemResponse(ok: false, items: nil, item: nil, error: response.error)
+        return String(decoding: try JSONEncoder().encode(result), as: UTF8.self)
+    }
+
+    func listDirectory(domainIdentifier: String, parentIdentifier: String, reply: @escaping (String?, NSError?) -> Void) {
         backendQueue.async {
             do {
-                let remote = try configurationStore.remote(domainIdentifier: domainIdentifier)
-                logger.notice("Go-backed List domain=\(domainIdentifier, privacy: .public) path=\(path, privacy: .private)")
-                let result = remote.withCString { r in path.withCString { p in stringResult(RcloneCloudMountList(r, p)) } }
-                reply(sanitizedResult(result), nil)
+                let result = try domainCatalog.withDirectoryDiscovery(domain: domainIdentifier, parentIdentifier: parentIdentifier) { snapshot in
+                    let remote = snapshot.remote
+                    let path: String
+                    if parentIdentifier == CloudMountItemIdentifier.root { path = "" }
+                    else {
+                        let parent = try domainCatalog.withSnapshot(snapshot) { try $0.resolve(domain: domainIdentifier, identifier: parentIdentifier) }
+                        guard parent.metadata.isDirectory else { throw ItemCatalogError.noSuchItem }
+                        path = parent.path
+                    }
+                    logger.notice("Go-backed List domain=\(domainIdentifier, privacy: .public) path=\(path, privacy: .private)")
+                    let result = remote.withCString { r in path.withCString { p in stringResult(RcloneCloudMountList(r, p)) } }
+                    return try self.itemResult(result) { response in
+                        let items = try domainCatalog.withSnapshot(snapshot) { try $0.reconcile(domain: domainIdentifier, parentIdentifier: parentIdentifier, entries: response.items ?? []) }
+                        return CloudMountItemResponse(ok: true, items: items, item: nil, error: nil)
+                    }
+                }
+                reply(result, nil)
             } catch { reply(nil, self.storeError(error)) }
         }
     }
 
-    func statItem(domainIdentifier: String, path: String, isDirectory: Bool, reply: @escaping (String?, NSError?) -> Void) {
+    func statItem(domainIdentifier: String, itemIdentifier: String, reply: @escaping (String?, NSError?) -> Void) {
         backendQueue.async {
             do {
-                let remote = try configurationStore.remote(domainIdentifier: domainIdentifier)
+                let snapshot = try domainCatalog.snapshot(domain: domainIdentifier)
+                let remote = snapshot.remote
+                let record = try domainCatalog.withSnapshot(snapshot) { try $0.resolve(domain: domainIdentifier, identifier: itemIdentifier) }
+                let path = record.path
+                let isDirectory = record.metadata.isDirectory
                 logger.notice("Go-backed Stat domain=\(domainIdentifier, privacy: .public) path=\(path, privacy: .private) directory=\(isDirectory)")
                 let result = remote.withCString { r in path.withCString { p in stringResult(RcloneCloudMountStat(r, p, isDirectory ? 1 : 0)) } }
-                reply(sanitizedResult(result), nil)
+                reply(try self.itemResult(result) { response in
+                    guard let entry = response.item else { throw ItemCatalogError.database }
+                    let item = try domainCatalog.withSnapshot(snapshot) { try $0.update(domain: domainIdentifier, identifier: itemIdentifier, entry: entry) }
+                    return CloudMountItemResponse(ok: true, items: nil, item: item, error: nil)
+                }, nil)
             } catch { reply(nil, self.storeError(error)) }
         }
     }
 
     func fetchContents(
         domainIdentifier: String,
-        path: String,
+        itemIdentifier: String,
         operationIdentifier: String,
         fileHandle: FileHandle,
         reply: @escaping (NSError?) -> Void
@@ -155,31 +193,53 @@ private final class DataService: NSObject, CloudMountDataProtocol {
         backendQueue.async {
             defer { try? fileHandle.close(); fetchOperations.release(domainIdentifier: domainIdentifier, operationIdentifier: operationIdentifier, transfer: transfer) }
             let remote: String
-            do { remote = try configurationStore.remote(domainIdentifier: domainIdentifier) }
+            let snapshot: DomainCatalog.Snapshot
+            let path: String
+            do {
+                snapshot = try domainCatalog.snapshot(domain: domainIdentifier)
+                remote = snapshot.remote
+                let record = try domainCatalog.withSnapshot(snapshot) { try $0.resolve(domain: domainIdentifier, identifier: itemIdentifier) }
+                guard !record.metadata.isDirectory else { throw ItemCatalogError.noSuchItem }
+                path = record.path
+            }
             catch { reply(self.storeError(error)); return }
             logger.notice("Go-backed Fetch domain=\(domainIdentifier, privacy: .public) path=\(path, privacy: .private)")
             let rawJSON = remote.withCString { r in path.withCString { p in stringResult(RcloneCloudMountFetchFD(r, p, Int32(fileHandle.fileDescriptor), transfer)) } }
             let json = sanitizedResult(rawJSON)
             guard let data = json.data(using: .utf8), let response = try? JSONDecoder().decode(CloudMountBridgeResponse.self, from: data) else { reply(NSError(domain: "org.rclone.cloudmount", code: 1, userInfo: [NSLocalizedDescriptionKey: "invalid bridge response"])); return }
-            if response.ok { logger.notice("Go-backed Fetch completed path=\(path, privacy: .private)"); reply(nil) }
+            if response.ok {
+                do { _ = try domainCatalog.withSnapshot(snapshot) { try $0.resolve(domain: domainIdentifier, identifier: itemIdentifier) } }
+                catch { reply(self.storeError(error)); return }
+                logger.notice("Go-backed Fetch completed path=\(path, privacy: .private)"); reply(nil) }
             else { let message = response.error?.message ?? "backend operation failed"; logger.error("Go-backed Fetch failed path=\(path, privacy: .private) code=\(response.error?.code ?? "backend_error", privacy: .public)"); let code = response.error?.code == "not_found" ? 404 : 2; reply(NSError(domain: "org.rclone.cloudmount", code: code, userInfo: [NSLocalizedDescriptionKey: message])) }
         }
     }
 
-    func fetchPartialContents(domainIdentifier: String, path: String, operationIdentifier: String, offset: Int64, length: Int64, fileHandle: FileHandle, reply: @escaping (NSError?) -> Void) {
+    func fetchPartialContents(domainIdentifier: String, itemIdentifier: String, operationIdentifier: String, offset: Int64, length: Int64, fileHandle: FileHandle, reply: @escaping (NSError?) -> Void) {
         guard let transfer = fetchOperations.register(domainIdentifier: domainIdentifier, operationIdentifier: operationIdentifier) else {
             reply(NSError(domain: "org.rclone.cloudmount", code: 3, userInfo: [NSLocalizedDescriptionKey: "duplicate fetch operation"])); return
         }
         backendQueue.async {
             defer { try? fileHandle.close(); fetchOperations.release(domainIdentifier: domainIdentifier, operationIdentifier: operationIdentifier, transfer: transfer) }
             let remote: String
-            do { remote = try configurationStore.remote(domainIdentifier: domainIdentifier) }
+            let snapshot: DomainCatalog.Snapshot
+            let path: String
+            do {
+                snapshot = try domainCatalog.snapshot(domain: domainIdentifier)
+                remote = snapshot.remote
+                let record = try domainCatalog.withSnapshot(snapshot) { try $0.resolve(domain: domainIdentifier, identifier: itemIdentifier) }
+                guard !record.metadata.isDirectory else { throw ItemCatalogError.noSuchItem }
+                path = record.path
+            }
             catch { reply(self.storeError(error)); return }
             logger.notice("Go-backed range fetch domain=\(domainIdentifier, privacy: .public) path=\(path, privacy: .private) offset=\(offset) length=\(length)")
             let rawJSON = remote.withCString { r in path.withCString { p in stringResult(RcloneCloudMountFetchRangeFD(r, p, Int32(fileHandle.fileDescriptor), offset, length, transfer)) } }
             let json = sanitizedResult(rawJSON)
             guard let data = json.data(using: .utf8), let response = try? JSONDecoder().decode(CloudMountBridgeResponse.self, from: data) else { reply(NSError(domain: "org.rclone.cloudmount", code: 1, userInfo: [NSLocalizedDescriptionKey: "invalid bridge response"])); return }
-            if response.ok { logger.notice("Go-backed range fetch completed offset=\(offset) length=\(length)"); reply(nil) }
+            if response.ok {
+                do { _ = try domainCatalog.withSnapshot(snapshot) { try $0.resolve(domain: domainIdentifier, identifier: itemIdentifier) } }
+                catch { reply(self.storeError(error)); return }
+                logger.notice("Go-backed range fetch completed offset=\(offset) length=\(length)"); reply(nil) }
             else { let message = response.error?.message ?? "backend operation failed"; let code = response.error?.code == "cancelled" ? NSUserCancelledError : 2; reply(NSError(domain: "org.rclone.cloudmount", code: code, userInfo: [NSLocalizedDescriptionKey: message])) }
         }
     }
