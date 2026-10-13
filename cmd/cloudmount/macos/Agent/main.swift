@@ -265,8 +265,12 @@ private final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
     }
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
+        guard CloudMountPeerIdentity.acceptsUser(connection.effectiveUserIdentifier, expected: geteuid()) else {
+            logger.error("rejected different-user XPC peer role=\(self.role, privacy: .public)")
+            return false
+        }
         connection.setCodeSigningRequirement(peerRequirement)
-        logger.notice("configured \(self.role, privacy: .public) XPC peer authentication")
+        logger.notice("configured \(self.role, privacy: .public) XPC peer authentication pid=\(connection.processIdentifier)")
         connection.exportedInterface = interface
         connection.exportedObject = service
         connection.invalidationHandler = { logger.notice("XPC connection invalidated") }

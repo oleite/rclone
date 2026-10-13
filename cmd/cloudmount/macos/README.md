@@ -28,16 +28,19 @@ APP="$HOME/Applications/RcloneCloudMount.app"
 "$APP/Contents/MacOS/RcloneCloudMount" agent-register
 "$APP/Contents/MacOS/RcloneCloudMount" agent-status
 "$APP/Contents/MacOS/RcloneCloudMount" agent-ping
-"$APP/Contents/MacOS/RcloneCloudMount" domain-add-test /absolute/path/to/test/root
+"$APP/Contents/MacOS/RcloneCloudMount" domain-add "Example location" example:
 "$APP/Contents/MacOS/RcloneCloudMount" domain-list
 ```
 
-The remaining commands are `domain-remove-test` and `agent-unregister`. Status may
+The remaining commands are `domain-remove <domain-id>`, `domain-path <domain-id>`
+and `agent-unregister`. `domain-path` queries Apple's `getUserVisibleURL` from the
+installed containing app; it does not assume a CloudStorage filesystem location.
+Status may
 be `notRegistered`, `enabled`, `requiresApproval`, or `notFound`. If registration
 requires approval, enable Rclone CloudMount in **System Settings > General > Login
 Items & Extensions** and run the status command again.
 
-Debug builds request File Provider testing mode so the test domain is always
+Debug builds request File Provider testing mode so development domains are always
 enabled. Release builds omit that entitlement and report the domain's real
 `userEnabled` value; enable the provider under **System Settings > General > Login
 Items & Extensions > File Providers** when needed.
@@ -48,21 +51,39 @@ with a Personal Team, set `CLOUDMOUNT_APP_DEBUG_ENTITLEMENTS` to
 `CLOUDMOUNT_TESTING_MODE_SWIFT_CONDITION` in `Local.xcconfig`. This selects normal
 user-enabled behavior without changing Release configuration.
 
-The fixed development domain is `org.rclone.cloudmount.test`, displayed as
-`Rclone CloudMount Test`. `domain-add-test` first stores the domain-to-remote
+`domain-add <display-name> <remote:path>` generates a stable opaque
+`org.rclone.cloudmount.domain.<UUID>` identifier and prints it before side effects.
+New IDs do not encode account, remote or pathname information. Every add allocates
+a fresh ID; an interrupted attempt can be cleaned up using its printed ID.
+Registration first stores the domain-to-remote
 mapping in the LaunchAgent and then registers a plain File Provider domain. The
 File Provider receives opaque item/parent identifiers and item metadata; it never
 receives or stores backend-relative paths or the rclone remote selector.
 
 The LaunchAgent persists its versioned mapping in
 `~/Library/Application Support/Rclone CloudMount/domains.json`. The directory is
-mode `0700`, the file is mode `0600`, and updates are atomic. Removing the test
-domain removes the File Provider domain first and its Agent mapping second.
+mode `0700`, the file is mode `0600`, and updates are atomic. JSON and SQLite v1
+already support arbitrary independent domains; no schema reset/migration is needed.
+Display names/registered IDs remain authoritative in NSFileProviderManager.
+Removing a domain removes the File Provider domain first and its Agent mapping
+second, without changing another domain. Failed/uncertain registration retains
+mapping until a live registration can be removed safely; retry cleanup using the
+printed ID. Existing owned-namespace IDs can also be removed with the general command.
 
 The Agent exposes two mutually authenticated Mach services in the same process.
 The containing app alone can use the control service for ping and domain mapping;
 the File Provider alone can use the data service for List, Stat, and Fetch. Each
-listener enforces the exact same-team client identifier for its role.
+listener enforces the exact same-team client identifier for its role and the
+Agent's effective user. Clients enforce the Agent's Apple anchor/team/identifier.
+
+Multiple domains share one authenticated Provider principal for this macOS user.
+Apple permits several replicated-extension instances in one process; public XPC
+peer attributes identify the process/user, not the originating domain instance.
+The trusted extension services all this user's configured CloudMount domains.
+Domain+item catalog lookup prevents accidental cross-domain IDs, but it is not
+cryptographic per-instance authorization. No shared-container secret is claimed
+to provide that separation. See Apple's [domain documentation](https://developer.apple.com/documentation/fileprovider/nsfileproviderdomain)
+and [XPC peer attributes](https://developer.apple.com/documentation/foundation/nsxpcconnection).
 
 The read-only data path is direct:
 
@@ -145,17 +166,21 @@ External rename continuity is conservatively delete/create until demonstrated
 backend IDs support it. SMB fixture entries provided no backend IDs.
 
 Upgrade from the path-ID prototype requires development-domain recreation:
-run `domain-remove-test` with the old installed app, update the app, and then
-`domain-add-test <test-root>` with the new app. Old IDs are never reinterpreted as
+remove the old domain using its existing ID, update the app, and then use
+`domain-add <display-name> <remote:path>` with the new app. Old IDs are never reinterpreted as
 paths, and CloudMount never modifies Apple's private File Provider database.
 
 `enumerateChanges` remains a limited no-op with a constant anchor; signaling an
 enumerator is not remote-change synchronization. A direct provider enumeration
 reconciles the catalog, but cached Finder namespaces may require domain recreation
 to discover external changes in this development phase. No polling/journal is added.
-Before simultaneous CloudMount domains, data-plane authorization must also bind a
-provider domain to the domain identifier it is permitted to submit; catalog lookup
-isolation alone does not provide that authorization.
+Live rclone configuration retargeting of a mounted domain is unsupported: remove
+and reconfigure the domain before changing its backing configuration. Selector
+binding is not a fingerprint of the underlying account/backend instance.
+
+The deferred generic write substrate must address atomic no-clobber commits:
+current generic Move/SMB rename can replace an external destination created after
+the last absence check. No write capability or dependency fork is added here.
 
 Run native identity/catalog, lifecycle, capability, range and domain-store tests with:
 
@@ -165,6 +190,40 @@ cmd/cloudmount/macos/Scripts/test-file-provider.sh
 
 The capability test checks Objective-C protocol advertisement on the actual
 extension class; compiling it also checks the retained partial implementation.
+
+## OneDrive-backed domain characterization
+
+OneDrive objects and directories expose Microsoft's driveItem IDs. The backend
+normalizes available drive IDs with item IDs (`drive#item`) and handles remote
+items using their referenced drive/item identity. The crypt backend forwards
+wrapped object/directory identity. These are private Agent catalog evidence, not
+Provider identifiers. Repeated read-only discovery can establish stability at a
+path; it does not by itself test external rename/move. Microsoft's [ID addressing
+contract](https://learn.microsoft.com/en-us/graph/onedrive-addressing-driveitems)
+supports continuity within a drive across rename/move. Runtime rename/move proof
+and safe generic reconciliation remain deferred to an authorized write fixture;
+the current catalog does not globally merge entries by backend ID.
+
+OneDrive exposes polling-based `ChangeNotify` using Graph delta, except in the
+backend's documented China-region case. The optional `delta` configuration
+advertises `ListR`; recursive delta works at drive root and may enumerate the
+whole drive before filtering a subroot. Ordinary `List` uses children listings.
+CloudMount starts neither change polling nor recursive delta enumeration.
+Graph's [delta feed](https://learn.microsoft.com/en-us/graph/api/driveitem-delta?view=graph-rest-1.0)
+provides continuation/deletion evidence, but File Provider still needs durable
+anchors, catalog updates and working-set changes—not merely path notifications.
+
+For future writes, Graph [upload sessions](https://learn.microsoft.com/en-us/graph/api/driveitem-createuploadsession?view=graph-rest-1.0)
+offer conflict behavior and ETag/cTag preconditions. [Move](https://learn.microsoft.com/en-us/graph/api/driveitem-move?view=graph-rest-1.0)
+and [delete](https://learn.microsoft.com/en-us/graph/api/driveitem-delete?view=graph-rest-1.0)
+also document conditional requests. These API-specific guarantees must not be
+assumed to exist in the generic rclone mutation contract. Current OneDrive
+Move/DirMove PATCH item IDs within a drive; Remove DELETEs by ID, without a
+caller-supplied base-version precondition in those helpers. Upload session
+construction does not expose an explicit conflict-policy/precondition contract
+to CloudMount. API response types contain ETag/cTag, but current CloudMount
+versions still use kind/size/mtime. No OneDrive or generic write interface is
+changed, and production capabilities remain read-only.
 
 Inspect the unified log when validating List, Stat, and Fetch operations:
 

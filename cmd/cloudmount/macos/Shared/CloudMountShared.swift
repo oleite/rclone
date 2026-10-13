@@ -47,6 +47,25 @@ enum CloudMountItemIdentifier {
     }
 }
 
+enum CloudMountDomainIdentifier {
+    private static let namespace = "org.rclone.cloudmount."
+    private static let prefix = namespace + "domain."
+    static func make() -> String { prefix + UUID().uuidString.lowercased() }
+    static func isValid(_ value: String) -> Bool {
+        guard value.hasPrefix(prefix), let uuid = UUID(uuidString: String(value.dropFirst(prefix.count))) else { return false }
+        return value == prefix + uuid.uuidString.lowercased()
+    }
+    // Existing owned-namespace IDs may be removed, but new registrations use UUIDs.
+    static func isManaged(_ value: String) -> Bool {
+        guard value.hasPrefix(namespace), value.count > namespace.count else { return false }
+        return value.unicodeScalars.allSatisfy { CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-").contains($0) }
+    }
+}
+
+enum CloudMountPeerIdentity {
+    static func acceptsUser(_ peer: UInt32, expected: UInt32) -> Bool { peer == expected }
+}
+
 // DATA responses deliberately exclude backend-relative paths and selectors.
 struct CloudMountItemMetadata: Codable {
     let itemIdentifier: String
@@ -67,9 +86,6 @@ struct CloudMountItemResponse: Codable {
 }
 
 enum CloudMountConstants {
-    static let domainIdentifier = "org.rclone.cloudmount.test"
-    static let domainDisplayName = "Rclone CloudMount Test"
-
     static var controlMachServiceName: String {
         infoString("CloudMountControlMachService")
     }

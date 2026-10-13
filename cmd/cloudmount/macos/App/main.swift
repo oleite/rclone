@@ -8,7 +8,7 @@ enum ControlError: Error, CustomStringConvertible {
 
     var description: String {
         switch self {
-        case .usage: return "usage: RcloneCloudMount <agent-register|agent-unregister|agent-status|agent-ping|domain-list|domain-remove-test> | domain-add-test <remote:path>"
+        case .usage: return "usage: RcloneCloudMount <agent-register|agent-unregister|agent-status|agent-ping|domain-list> | domain-add <display-name> <remote:path> | domain-remove <domain-id> | domain-path <domain-id>"
         case .operation(let message): return message
         }
     }
@@ -30,15 +30,33 @@ func waitForResult<T>(_ body: (@escaping (T?, Error?) -> Void) -> Void) throws -
     return result
 }
 
-func domain() -> NSFileProviderDomain {
+func domain(identifier: String, displayName: String) -> NSFileProviderDomain {
     let domain = NSFileProviderDomain(
-        identifier: NSFileProviderDomainIdentifier(CloudMountConstants.domainIdentifier),
-        displayName: CloudMountConstants.domainDisplayName
+        identifier: NSFileProviderDomainIdentifier(identifier),
+        displayName: displayName
     )
 #if CLOUDMOUNT_FILE_PROVIDER_TESTING_MODE
     domain.testingModes = [.alwaysEnabled]
 #endif
     return domain
+}
+
+func registeredDomains() throws -> [NSFileProviderDomain] {
+    try waitForResult { completion in NSFileProviderManager.getDomainsWithCompletionHandler { completion($0, $1) } } ?? []
+}
+
+func lifecycle() -> DomainLifecycle {
+    DomainLifecycle(
+        registeredIdentifiers: { try registeredDomains().map { $0.identifier.rawValue } },
+        isConfigured: configurationStatus,
+        configure: { id, remote in try withAgent { proxy, completion in proxy.configureDomain(domainIdentifier: id, remote: remote) { completion($0) } } },
+        register: { id, name in try waitForResult { completion in NSFileProviderManager.add(domain(identifier: id, displayName: name), completionHandler: { completion((), $0) }) } as Void? },
+        deregister: { id in
+            guard let value = try registeredDomains().first(where: { $0.identifier.rawValue == id }) else { throw DomainLifecycleError.unknownDomain }
+            try waitForResult { completion in NSFileProviderManager.remove(value, completionHandler: { completion((), $0) }) } as Void?
+        },
+        removeConfiguration: { id in try withAgent { proxy, completion in proxy.removeDomainConfiguration(domainIdentifier: id) { completion($0) } } }
+    )
 }
 
 func withAgent(_ operation: (CloudMountControlProtocol, @escaping (Error?) -> Void) -> Void) throws {
@@ -89,7 +107,12 @@ func agentStatusText(_ status: SMAppService.Status) -> String {
 func run() throws {
     guard CommandLine.arguments.count >= 2 else { throw ControlError.usage }
     let command = CommandLine.arguments[1]
-    guard command == "domain-add-test" || CommandLine.arguments.count == 2 else { throw ControlError.usage }
+    let arguments = Array(CommandLine.arguments.dropFirst(2))
+    switch command {
+    case "domain-add": guard arguments.count == 2 else { throw ControlError.usage }
+    case "domain-remove", "domain-path": guard arguments.count == 1 else { throw ControlError.usage }
+    default: guard arguments.isEmpty else { throw ControlError.usage }
+    }
     let service = SMAppService.agent(plistName: agentPlistName)
 
     switch command {
@@ -108,34 +131,31 @@ func run() throws {
     case "agent-ping":
         try pingAgent()
         print("pong")
-    case "domain-add-test":
-        guard CommandLine.arguments.count == 3 else { throw ControlError.usage }
-        let remote = CommandLine.arguments[2]
-        guard !remote.isEmpty else { throw ControlError.usage }
+    case "domain-add":
+        let identifier = CloudMountDomainIdentifier.make()
+        guard CloudMountDomainIdentifier.isValid(identifier), DomainLifecycle.validDisplayName(arguments[0]) else { throw DomainLifecycleError.invalidInput }
         try pingAgent()
-        try withAgent { proxy, completion in proxy.configureDomain(domainIdentifier: CloudMountConstants.domainIdentifier, remote: remote) { completion($0) } }
-        do {
-            try waitForResult { completion in NSFileProviderManager.add(domain(), completionHandler: { completion((), $0) }) } as Void?
-        } catch {
-            do { try withAgent { proxy, completion in proxy.removeDomainConfiguration(domainIdentifier: CloudMountConstants.domainIdentifier) { completion($0) } } }
-            catch let rollbackError { throw ControlError.operation("domain registration failed; Agent configuration rollback also failed: \(error.localizedDescription); rollback: \(rollbackError.localizedDescription)") }
-            throw ControlError.operation("domain registration failed; Agent configuration rolled back: \(error.localizedDescription)")
-        }
-        print("domain added: \(CloudMountConstants.domainIdentifier)")
+        // Emit the opaque ID before side effects so an interrupted add can be cleaned up.
+        print("domain identifier: \(identifier)")
+        fflush(stdout)
+        _ = try lifecycle().add(displayName: arguments[0], remote: arguments[1], identifier: identifier)
+        print("domain added: \(identifier)")
     case "domain-list":
-        let domains: [NSFileProviderDomain] = try waitForResult { completion in
-            NSFileProviderManager.getDomainsWithCompletionHandler { completion($0, $1) }
-        } ?? []
+        let domains = try registeredDomains()
         for value in domains {
             let configured = try configurationStatus(domainIdentifier: value.identifier.rawValue)
             print("identifier=\(value.identifier.rawValue) displayName=\(value.displayName) userEnabled=\(value.userEnabled) remoteConfigured=\(configured)")
         }
-    case "domain-remove-test":
-        do { try waitForResult { completion in NSFileProviderManager.remove(domain(), completionHandler: { completion((), $0) }) } as Void? }
-        catch { throw ControlError.operation("File Provider domain removal failed; Agent configuration retained: \(error.localizedDescription)") }
-        do { try withAgent { proxy, completion in proxy.removeDomainConfiguration(domainIdentifier: CloudMountConstants.domainIdentifier) { completion($0) } } }
-        catch { throw ControlError.operation("File Provider domain removed, but Agent configuration removal failed: \(error.localizedDescription)") }
-        print("domain removed: \(CloudMountConstants.domainIdentifier)")
+    case "domain-remove":
+        try lifecycle().remove(identifier: arguments[0])
+        print("domain removed: \(arguments[0])")
+    case "domain-path":
+        guard CloudMountDomainIdentifier.isManaged(arguments[0]),
+              let value = try registeredDomains().first(where: { $0.identifier.rawValue == arguments[0] }),
+              let manager = NSFileProviderManager(for: value) else { throw DomainLifecycleError.unknownDomain }
+        let url: URL? = try waitForResult { completion in manager.getUserVisibleURL(for: .rootContainer) { completion($0, $1) } }
+        guard let url else { throw ControlError.operation("domain location unavailable") }
+        print(url.path)
     default:
         throw ControlError.usage
     }
