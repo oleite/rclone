@@ -125,8 +125,44 @@ private final class ControlService: NSObject, CloudMountControlProtocol {
 private final class DataService: NSObject, CloudMountDataProtocol {
     private func storeError(_ error: Error) -> NSError {
         let missing = (error as? ItemCatalogError) == .noSuchItem
-        return NSError(domain: "org.rclone.cloudmount", code: missing ? 404 : 2,
-                       userInfo: [NSLocalizedDescriptionKey: missing ? "item not found" : "backend operation failed"])
+        let expired = (error as? ItemCatalogError) == .syncAnchorExpired
+        return NSError(domain: "org.rclone.cloudmount", code: expired ? -1002 : missing ? 404 : 2,
+                       userInfo: [NSLocalizedDescriptionKey: expired ? "sync anchor expired" : missing ? "item not found" : "backend operation failed"])
+    }
+
+    func currentSyncAnchor(domainIdentifier: String, containerIdentifier: String, reply: @escaping (Data?, NSError?) -> Void) {
+        backendQueue.async {
+            do {
+                let snapshot = try domainCatalog.snapshot(domain: domainIdentifier)
+                let anchor = try domainCatalog.withSnapshot(snapshot) { catalog in
+                    if containerIdentifier != CloudMountItemIdentifier.root && containerIdentifier != CloudMountItemIdentifier.workingSet {
+                        _ = try catalog.resolve(domain: domainIdentifier, identifier: containerIdentifier)
+                    }
+                    return try catalog.currentAnchor(domain: domainIdentifier)
+                }
+                reply(anchor, nil)
+            } catch { reply(nil, self.storeError(error)) }
+        }
+    }
+
+    func enumerateChanges(domainIdentifier: String, containerIdentifier: String, fromAnchor: Data, limit: Int, reply: @escaping (String?, NSError?) -> Void) {
+        backendQueue.async {
+            do {
+                let snapshot = try domainCatalog.snapshot(domain: domainIdentifier)
+                let response = try domainCatalog.withSnapshot(snapshot) { try $0.changes(domain: domainIdentifier, container: containerIdentifier, from: fromAnchor, limit: limit) }
+                reply(String(decoding: try JSONEncoder().encode(response), as: UTF8.self), nil)
+            } catch { reply(nil, self.storeError(error)) }
+        }
+    }
+
+    func enumerateWorkingSet(domainIdentifier: String, page: Data?, limit: Int, reply: @escaping (String?, NSError?) -> Void) {
+        backendQueue.async {
+            do {
+                let snapshot = try domainCatalog.snapshot(domain: domainIdentifier)
+                let response = try domainCatalog.withSnapshot(snapshot) { try $0.workingSet(domain: domainIdentifier, page: page, limit: limit) }
+                reply(String(decoding: try JSONEncoder().encode(response), as: UTF8.self), nil)
+            } catch { reply(nil, self.storeError(error)) }
+        }
     }
 
     private func itemResult(_ raw: String, transform: (CloudMountBridgeResponse) throws -> CloudMountItemResponse) throws -> String {

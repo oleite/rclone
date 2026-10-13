@@ -10,6 +10,9 @@ import Foundation
 @objc protocol CloudMountDataProtocol {
     func listDirectory(domainIdentifier: String, parentIdentifier: String, reply: @escaping (String?, NSError?) -> Void)
     func statItem(domainIdentifier: String, itemIdentifier: String, reply: @escaping (String?, NSError?) -> Void)
+    func currentSyncAnchor(domainIdentifier: String, containerIdentifier: String, reply: @escaping (Data?, NSError?) -> Void)
+    func enumerateChanges(domainIdentifier: String, containerIdentifier: String, fromAnchor: Data, limit: Int, reply: @escaping (String?, NSError?) -> Void)
+    func enumerateWorkingSet(domainIdentifier: String, page: Data?, limit: Int, reply: @escaping (String?, NSError?) -> Void)
     func fetchContents(
         domainIdentifier: String,
         itemIdentifier: String,
