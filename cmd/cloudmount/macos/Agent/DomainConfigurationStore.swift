@@ -54,6 +54,10 @@ final class DomainConfigurationStore {
         try locked { try readUnlocked().domains[domainIdentifier] != nil }
     }
 
+    func domainIdentifiers() throws -> [String] {
+        try locked { try readUnlocked().domains.keys.sorted() }
+    }
+
     func remote(domainIdentifier: String) throws -> String {
         try locked {
             guard let remote = try readUnlocked().domains[domainIdentifier]?.remote else {

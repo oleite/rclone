@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import os
 
 private let logger = Logger(subsystem: "org.rclone.cloudmount", category: "agent")
@@ -12,6 +13,8 @@ private let domainCatalog: DomainCatalog = {
     do { return DomainCatalog(configuration: configurationStore, catalog: try ItemCatalog.applicationSupportCatalog()) }
     catch { fatalError("unable to open CloudMount item catalog") }
 }()
+
+private let remoteSynchronization = CloudMountRemoteSync(catalog: domainCatalog, configuration: configurationStore)
 
 private func infoString(_ key: String) -> String {
     guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String, !value.isEmpty else {
@@ -102,14 +105,14 @@ private final class ControlService: NSObject, CloudMountControlProtocol {
 
     func configureDomain(domainIdentifier: String, remote: String, reply: @escaping (NSError?) -> Void) {
         backendQueue.async {
-            do { try domainCatalog.configure(domain: domainIdentifier, remote: remote); logger.notice("configured domain \(domainIdentifier, privacy: .public)"); reply(nil) }
+            do { try domainCatalog.configure(domain: domainIdentifier, remote: remote); remoteSynchronization.refresh(domain: domainIdentifier); logger.notice("configured domain \(domainIdentifier, privacy: .public)"); reply(nil) }
             catch { logger.error("failed to configure domain \(domainIdentifier, privacy: .public): \(error.localizedDescription, privacy: .private)"); reply(self.storeError(error)) }
         }
     }
 
     func removeDomainConfiguration(domainIdentifier: String, reply: @escaping (NSError?) -> Void) {
         backendQueue.async {
-            do { try domainCatalog.remove(domain: domainIdentifier); logger.notice("removed domain configuration \(domainIdentifier, privacy: .public)"); reply(nil) }
+            do { remoteSynchronization.stop(domain: domainIdentifier); try domainCatalog.remove(domain: domainIdentifier); logger.notice("removed domain configuration \(domainIdentifier, privacy: .public)"); reply(nil) }
             catch { logger.error("failed to remove domain configuration \(domainIdentifier, privacy: .public): \(error.localizedDescription, privacy: .private)"); reply(self.storeError(error)) }
         }
     }
@@ -325,4 +328,12 @@ dataListener.delegate = dataDelegate
 logger.notice("agent listening on separate control and data services")
 controlListener.resume()
 dataListener.resume()
+remoteSynchronization.restore()
+Darwin.signal(SIGTERM, SIG_IGN)
+Darwin.signal(SIGINT, SIG_IGN)
+private let terminationSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+private let interruptionSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+terminationSource.setEventHandler { remoteSynchronization.stopAll(); exit(0) }
+interruptionSource.setEventHandler { remoteSynchronization.stopAll(); exit(0) }
+terminationSource.resume(); interruptionSource.resume()
 RunLoop.current.run()

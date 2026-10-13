@@ -5,18 +5,30 @@ import "C"
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
+	"os"
 	"sync"
+	"time"
 	"unsafe"
 
 	_ "github.com/rclone/rclone/backend/all"
+	"github.com/rclone/rclone/fs"
 	_ "github.com/rclone/rclone/lib/plugin"
 	"github.com/rclone/rclone/librclone/librclone"
 )
 
 var initializeOnce sync.Once
 
-func initialize() { initializeOnce.Do(librclone.Initialize) }
+func initialize() {
+	initializeOnce.Do(func() {
+		librclone.Initialize()
+		handler := redactedBackendHandler{destination: slog.NewTextHandler(os.Stderr, nil)}
+		fs.SetLogger(handler)
+		slog.SetDefault(slog.New(handler))
+	})
+}
 func exported(operation func() bridgeResponse) (result *C.char) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -81,4 +93,47 @@ func RcloneCloudMountFetchRangeFD(remote, remotePath *C.char, fd C.int, offset, 
 
 //export RcloneCloudMountFreeString
 func RcloneCloudMountFreeString(value *C.char) { C.free(unsafe.Pointer(value)) }
-func main()                                    {}
+
+func watchExported(operation func() watchResponse) (result *C.char) {
+	defer func() {
+		if recover() != nil {
+			result = C.CString(`{"ok":false,"error":{"code":"internal_error","message":"change watch unavailable"}}`)
+		}
+	}()
+	initialize()
+	data, err := json.Marshal(operation())
+	if err != nil {
+		return C.CString(`{"ok":false,"error":{"code":"internal_error","message":"change watch unavailable"}}`)
+	}
+	return C.CString(string(data))
+}
+
+// RcloneCloudMountWatchStart creates an Agent-private ChangeNotify handle.
+//
+//export RcloneCloudMountWatchStart
+func RcloneCloudMountWatchStart(remote *C.char, intervalSeconds C.int) *C.char {
+	return watchExported(func() watchResponse {
+		if intervalSeconds < 1 || intervalSeconds > 3600 {
+			return watchFailure("invalid_interval")
+		}
+		return cloudMountWatches.start(context.Background(), C.GoString(remote), time.Duration(intervalSeconds)*time.Second)
+	})
+}
+
+// RcloneCloudMountWatchNext returns a private hint or a bounded timeout.
+//
+//export RcloneCloudMountWatchNext
+func RcloneCloudMountWatchNext(handle C.ulonglong, timeoutMilliseconds C.int) *C.char {
+	return watchExported(func() watchResponse {
+		if timeoutMilliseconds < 0 || timeoutMilliseconds > 2000 {
+			return watchFailure("invalid_timeout")
+		}
+		return cloudMountWatches.next(uint64(handle), time.Duration(timeoutMilliseconds)*time.Millisecond)
+	})
+}
+
+// RcloneCloudMountWatchStop releases the handle and wakes blocked consumers.
+//
+//export RcloneCloudMountWatchStop
+func RcloneCloudMountWatchStop(handle C.ulonglong) { cloudMountWatches.stop(uint64(handle)) }
+func main()                                        {}

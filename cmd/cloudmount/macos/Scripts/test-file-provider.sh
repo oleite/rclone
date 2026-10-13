@@ -3,7 +3,7 @@ set -eu
 
 native_root=$(cd "$(dirname "$0")/.." && pwd)
 test_dir=$(mktemp -d "${TMPDIR:-/tmp}/cloudmount-native-tests.XXXXXX")
-trap 'rm -f "$test_dir/hydration-mode" "$test_dir/range-alignment" "$test_dir/domain-store" "$test_dir/identity" "$test_dir/catalog" "$test_dir/provider-identity" "$test_dir/domain-catalog" "$test_dir/domain-lifecycle" "$test_dir/multi-domain" "$test_dir/sync-catalog" "$test_dir/provider-change"; rmdir "$test_dir"' EXIT
+trap 'rm -f "$test_dir/hydration-mode" "$test_dir/range-alignment" "$test_dir/domain-store" "$test_dir/identity" "$test_dir/catalog" "$test_dir/provider-identity" "$test_dir/domain-catalog" "$test_dir/domain-lifecycle" "$test_dir/multi-domain" "$test_dir/sync-catalog" "$test_dir/provider-change" "$test_dir/remote-coordinator"; rmdir "$test_dir"' EXIT
 
 xcrun swiftc -target "$(uname -m)-apple-macos13.0" \
     "$native_root/Shared/CloudMountShared.swift" "$native_root"/FileProvider/*.swift \
@@ -54,3 +54,8 @@ xcrun swiftc -target "$(uname -m)-apple-macos13.0" \
     "$native_root/Shared/CloudMountShared.swift" "$native_root"/FileProvider/*.swift \
     "$native_root/Tests/FileProviderChangeTests.swift" -o "$test_dir/provider-change"
 "$test_dir/provider-change"
+
+xcrun swiftc "$native_root/Shared/CloudMountShared.swift" "$native_root/Agent/ItemCatalog.swift" \
+    "$native_root/Agent/DomainConfigurationStore.swift" "$native_root/Agent/DomainCatalog.swift" \
+    "$native_root/Agent/RemoteChangeCoordinator.swift" "$native_root/Tests/RemoteChangeCoordinatorTests.swift" -o "$test_dir/remote-coordinator"
+"$test_dir/remote-coordinator"

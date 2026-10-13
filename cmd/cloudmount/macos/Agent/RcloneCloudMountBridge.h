@@ -12,5 +12,8 @@ void RcloneCloudMountTransferRelease(uint64_t transfer);
 char *RcloneCloudMountFetchFD(const char *remote, const char *path, int fd, uint64_t transfer);
 char *RcloneCloudMountFetchRangeFD(const char *remote, const char *path, int fd, int64_t offset, int64_t length, uint64_t transfer);
 void RcloneCloudMountFreeString(char *value);
+char *RcloneCloudMountWatchStart(const char *remote, int intervalSeconds);
+char *RcloneCloudMountWatchNext(uint64_t handle, int timeoutMilliseconds);
+void RcloneCloudMountWatchStop(uint64_t handle);
 
 #endif

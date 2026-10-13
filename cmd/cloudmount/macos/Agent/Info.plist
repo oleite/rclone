@@ -11,4 +11,6 @@
 <key>CloudMountTeamIdentifier</key><string>$(CLOUDMOUNT_TEAM_ID)</string>
 <key>CloudMountAppBundleIdentifier</key><string>$(CLOUDMOUNT_BUNDLE_ID)</string>
 <key>CloudMountFileProviderBundleIdentifier</key><string>$(CLOUDMOUNT_BUNDLE_ID).FileProvider</string>
+<key>CloudMountSyncHintInterval</key><string>$(CLOUDMOUNT_SYNC_HINT_INTERVAL)</string>
+<key>CloudMountSyncSafetyInterval</key><string>$(CLOUDMOUNT_SYNC_SAFETY_INTERVAL)</string>
 </dict></plist>
