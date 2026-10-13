@@ -26,7 +26,8 @@ struct CloudMountSyncSettings {
 }
 
 /// A coordinator owns one binding generation. Only its serial worker performs
-/// scans; stop can synchronously release the watch while backend I/O is pending.
+/// scans. Durable publication has an independent queue, so stalled backend I/O
+/// cannot postpone its startup wake or retry. Stop releases the watch immediately.
 final class RemoteChangeCoordinator {
     private let snapshot: DomainCatalog.Snapshot
     private let catalog: DomainCatalog
@@ -35,10 +36,12 @@ final class RemoteChangeCoordinator {
     private let list: (String, String) throws -> [CloudMountMetadata]
     private let signal: (String, Int64) throws -> Void
     private let worker: DispatchQueue
+    private let publisher: DispatchQueue
     private let lock = NSLock()
     private var stopped = false; private var started = false
     private var handle: UInt64?
     private var timer: DispatchSourceTimer?
+    private var publicationTimer: DispatchSourceTimer?
     // Fields below are owned exclusively by worker.
     private var pending = Set<String>()
     private var scanAll = true
@@ -47,6 +50,7 @@ final class RemoteChangeCoordinator {
     private struct Retry { let at: TimeInterval; let delay: TimeInterval }
     private var retries: [String: Retry] = [:]
     private var watchRetry: Retry?
+    // Fields below are owned exclusively by publisher.
     private var signalRetry: Retry?
     private var signaledRevision: Int64 = -1
 
@@ -57,6 +61,7 @@ final class RemoteChangeCoordinator {
         self.snapshot = snapshot; self.catalog = catalog; self.driver = driver; self.settings = settings
         self.list = list; self.signal = signal
         worker = DispatchQueue(label: "org.rclone.cloudmount.sync.\(snapshot.domain)")
+        publisher = DispatchQueue(label: "org.rclone.cloudmount.publish.\(snapshot.domain)")
     }
     deinit { stop() }
 
@@ -64,6 +69,15 @@ final class RemoteChangeCoordinator {
     private var watchHandle: UInt64? { lock.lock(); defer { lock.unlock() }; return handle }
     func start() {
         lock.lock(); guard !started, !stopped else { lock.unlock(); return }; started = true; lock.unlock()
+        publisher.async { [self] in
+            self.publish()
+            self.lock.lock(); defer { self.lock.unlock() }
+            guard !self.stopped else { return }
+            let timer = DispatchSource.makeTimerSource(queue: self.publisher)
+            timer.schedule(deadline: .now() + self.settings.tick, repeating: max(0.01, self.settings.tick))
+            timer.setEventHandler { [weak self] in self?.publish() }
+            self.publicationTimer = timer; timer.resume()
+        }
         worker.async { [self] in
             guard self.active else { return }
             self.startWatch()
@@ -82,8 +96,9 @@ final class RemoteChangeCoordinator {
     func stop() {
         lock.lock(); stopped = true
         let handle = self.handle; self.handle = nil
-        let timer = self.timer; self.timer = nil; lock.unlock()
-        timer?.cancel()
+        let timer = self.timer; self.timer = nil
+        let publicationTimer = self.publicationTimer; self.publicationTimer = nil; lock.unlock()
+        timer?.cancel(); publicationTimer?.cancel()
         if let handle { driver.stop(handle) }
     }
     private func releaseWatch(_ expected: UInt64) {
@@ -171,21 +186,25 @@ final class RemoteChangeCoordinator {
                     syncLogger.error("authoritative reconciliation failed domain=\(self.snapshot.domain, privacy: .public); previous state retained")
                 }
             }
-            guard active else { return }
-            let revision = try catalog.withSnapshot(snapshot) { try $0.revision(domain: snapshot.domain) }
-            if revision > signaledRevision, (signalRetry?.at ?? 0) <= now {
-                do {
-                    try signal(snapshot.domain, revision)
-                    if active { signaledRevision = revision; signalRetry = nil }
-                } catch {
-                    signalRetry = retry(after: signalRetry, now: now)
-                    syncLogger.error("working set signal failed domain=\(self.snapshot.domain, privacy: .public); durable revision retained")
-                }
-            }
         } catch ItemCatalogError.noSuchItem { stop() }
         catch {
             scanAll = true; flushAt = now + settings.retry
             syncLogger.error("sync state unavailable domain=\(self.snapshot.domain, privacy: .public); retry scheduled")
+        }
+    }
+    private func publish() {
+        guard active else { return }
+        let now = Date().timeIntervalSince1970
+        guard (signalRetry?.at ?? 0) <= now else { return }
+        do {
+            let revision = try catalog.withSnapshot(snapshot) { try $0.revision(domain: snapshot.domain) }
+            guard active, revision > signaledRevision else { return }
+            try signal(snapshot.domain, revision)
+            if active { signaledRevision = revision; signalRetry = nil }
+        } catch ItemCatalogError.noSuchItem { stop() }
+        catch {
+            signalRetry = retry(after: signalRetry, now: now)
+            syncLogger.error("working set signal failed domain=\(self.snapshot.domain, privacy: .public); durable revision retained")
         }
     }
 }

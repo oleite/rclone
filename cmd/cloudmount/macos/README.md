@@ -212,7 +212,10 @@ outcomes remain available.
 After durable commit, the embedded Agent uses Apple's related-executable
 `NSFileProviderManager` support to signal `.workingSet`. Replicated providers ignore
 directory-specific signals. The working set is the observed catalog namespace;
-it is not a recursive whole-drive listing. Real `currentSyncAnchor` and
+it is not a recursive whole-drive listing.
+Durable revision publication and signal retries use a separate per-domain queue
+from watcher construction and remote scans, including the startup wake.
+Real `currentSyncAnchor` and
 `enumerateChanges` callbacks feed updates/deletions to fileproviderd. Catalog detection,
 signal acceptance, system ingestion and content rehydration are asynchronous, not
 one atomic user-visible event. See [Apple's replicated-provider sample](https://developer.apple.com/documentation/fileprovider/synchronizing-files-using-file-provider-extensions)

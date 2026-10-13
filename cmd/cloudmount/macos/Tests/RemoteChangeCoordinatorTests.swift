@@ -21,10 +21,38 @@ import Foundation
         let remote = FixtureRemote()
         let driver = CloudMountWatchDriver(start: { _, _ in 1 }, next: { _ in remote.hints() }, stop: { _ in remote.stopped() })
         let settings = CloudMountSyncSettings(hintInterval: 1, safetyInterval: 1000, debounce: 0.03, tick: 0.01, retry: 0.03, maximumRetry: 0.1)
+        // Durable publication must not depend on any remote operation finishing.
+        let constructing = DispatchSemaphore(value: 0), constructed = DispatchSemaphore(value: 0)
+        let durable = DispatchSemaphore(value: 0)
+        let restart = RemoteChangeCoordinator(snapshot: try catalog.snapshot(domain: "A"), catalog: catalog,
+            driver: CloudMountWatchDriver(start: { _, _ in constructing.signal(); constructed.wait(); return nil }, next: { _ in [] }, stop: { _ in }),
+            settings: settings, list: { _, _ in [entry(10)] }, signal: { _, _ in durable.signal() })
+        restart.start(); wait(constructing, "watch construction not suspended")
+        let publishedWhileConstructing = durable.wait(timeout: .now() + 1) == .success
+        restart.stop(); constructed.signal()
+
+        let listBlocked = DispatchSemaphore(value: 0), listRelease = DispatchSemaphore(value: 0)
+        let signalFailure = DispatchSemaphore(value: 0), signalRetried = DispatchSemaphore(value: 0)
+        let attempts = SignalAttempts()
+        let retrying = RemoteChangeCoordinator(snapshot: try catalog.snapshot(domain: "A"), catalog: catalog,
+            driver: .unsupported, settings: settings,
+            list: { _, _ in listBlocked.signal(); listRelease.wait(); return [entry(10)] },
+            signal: { _, _ in
+                if attempts.next() == 1 { signalFailure.signal(); throw TestFailure.injected }
+                signalRetried.signal()
+            })
+        retrying.start(); wait(listBlocked, "listing not suspended")
+        let failedWhileListing = signalFailure.wait(timeout: .now() + 1) == .success
+        let retriedWhileListing = signalRetried.wait(timeout: .now() + 1) == .success
+        retrying.stop(); listRelease.signal()
+        FileHandle.standardError.write(Data("Independent publication: blocked constructor=\(publishedWhileConstructing), blocked listing retry=\(failedWhileListing && retriedWhileListing)\n".utf8))
+        require(publishedWhileConstructing, "durable startup signal blocked by watch construction")
+        require(failedWhileListing && retriedWhileListing, "durable signal retry blocked by remote listing")
         let coordinator = RemoteChangeCoordinator(snapshot: try catalog.snapshot(domain: "A"), catalog: catalog,
             driver: driver, settings: settings, list: { _, _ in try remote.list() }, signal: { _, _ in try remote.signal() })
         coordinator.start()
         wait(remote.signaled, "startup did not signal durable state")
+        wait(remote.listed, "startup reconciliation not completed")
         let before = try items.currentAnchor(domain: "A")
         remote.change(size: 20, hints: 20)
         wait(remote.signaled, "coalesced hints did not converge")
@@ -53,7 +81,7 @@ import Foundation
         let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0), bReady = DispatchSemaphore(value: 0)
         let blocked = RemoteChangeCoordinator(snapshot: try catalog.snapshot(domain: "A"), catalog: catalog,
             driver: .unsupported, settings: settings,
-            list: { _, _ in entered.signal(); release.wait(); return [] }, signal: { _, _ in fatalError("retired domain signaled") })
+            list: { _, _ in entered.signal(); release.wait(); return [] }, signal: { _, _ in })
         blocked.start(); wait(entered, "A scan not entered")
         let independent = RemoteChangeCoordinator(snapshot: try catalog.snapshot(domain: "B"), catalog: catalog,
             driver: .unsupported, settings: settings, list: { _, _ in [entry(11)] }, signal: { _, _ in bReady.signal() })
@@ -64,7 +92,7 @@ import Foundation
         let remapEntered = DispatchSemaphore(value: 0), remapResume = DispatchSemaphore(value: 0), remapStopped = DispatchSemaphore(value: 0)
         let oldBinding = RemoteChangeCoordinator(snapshot: try catalog.snapshot(domain: "B"), catalog: catalog,
             driver: CloudMountWatchDriver(start: { _, _ in 3 }, next: { _ in [] }, stop: { _ in remapStopped.signal() }), settings: settings,
-            list: { _, _ in remapEntered.signal(); remapResume.wait(); return [] }, signal: { _, _ in fatalError("old binding signaled") })
+            list: { _, _ in remapEntered.signal(); remapResume.wait(); return [] }, signal: { _, _ in })
         oldBinding.start(); wait(remapEntered, "old binding scan did not enter")
         try catalog.configure(domain: "B", remote: "new-binding:")
         let replacement = try items.reconcile(domain: "B", parentIdentifier: parent, entries: [entry(47)])[0]
@@ -75,25 +103,33 @@ import Foundation
         let starting = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0), released = DispatchSemaphore(value: 0)
         let late = RemoteChangeCoordinator(snapshot: try catalog.snapshot(domain: "B"), catalog: catalog,
             driver: CloudMountWatchDriver(start: { _, _ in starting.signal(); resume.wait(); return 2 }, next: { _ in [] }, stop: { _ in released.signal() }),
-            settings: settings, list: { _, _ in fatalError("stopped constructor scanned") }, signal: { _, _ in fatalError("stopped constructor signaled") })
+            settings: settings, list: { _, _ in fatalError("stopped constructor scanned") }, signal: { _, _ in })
         late.start(); wait(starting, "watch constructor not started"); late.stop(); resume.signal(); wait(released, "late watch handle leaked")
 
         // Without ChangeNotify, startup and periodic authoritative safety scans suffice.
+        _ = try items.reconcile(domain: "B", parentIdentifier: parent, entries: [entry(10)])
         let polling = FixtureRemote()
         let poller = RemoteChangeCoordinator(snapshot: try catalog.snapshot(domain: "B"), catalog: catalog,
             driver: .unsupported, settings: CloudMountSyncSettings(hintInterval: 1, safetyInterval: 0.06, debounce: 0.02, tick: 0.01, retry: 0.02, maximumRetry: 0.1),
             list: { _, _ in try polling.list() }, signal: { _, _ in try polling.signal() })
         poller.start(); wait(polling.signaled, "unsupported watcher startup failed")
+        wait(polling.listed, "polling startup reconciliation not completed")
         polling.change(size: 77, hints: 0); wait(polling.signaled, "safety reconciliation did not converge")
         poller.stop()
         print("Remote coordinator tests passed: coalescing, catch-up/safety, failures/retry, signaling, independent domains, stale scans/start, stop")
     }
 }
 
+private enum TestFailure: Error { case injected }
+private final class SignalAttempts {
+    private let lock = NSLock(); private var count = 0
+    func next() -> Int { lock.lock(); defer { lock.unlock() }; count += 1; return count }
+}
+
 private final class FixtureRemote {
     private let lock = NSLock(); private var size: Int64 = 10; private var pending = 0
     private var listFailure = false; private var signalFailure = false; private var listings = 0; private var stops = 0
-    let signaled = DispatchSemaphore(value: 0), failed = DispatchSemaphore(value: 0), signalFailed = DispatchSemaphore(value: 0)
+    let signaled = DispatchSemaphore(value: 0), failed = DispatchSemaphore(value: 0), signalFailed = DispatchSemaphore(value: 0), listed = DispatchSemaphore(value: 0)
     var calls: Int { lock.lock(); defer { lock.unlock() }; return listings }
     var stopCount: Int { lock.lock(); defer { lock.unlock() }; return stops }
     func stopped() { lock.lock(); stops += 1; lock.unlock() }
@@ -102,6 +138,7 @@ private final class FixtureRemote {
     func list() throws -> [CloudMountMetadata] {
         lock.lock(); defer { lock.unlock() }; listings += 1
         if listFailure { failed.signal(); throw Failure.injected }
+        listed.signal()
         return [RemoteChangeCoordinatorTests.entry(size)]
     }
     func signal() throws { lock.lock(); defer { lock.unlock() }; if signalFailure { signalFailure = false; signalFailed.signal(); throw Failure.injected }; signaled.signal() }
