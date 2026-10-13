@@ -3,7 +3,7 @@ import Foundation
 import SQLite3
 
 enum ItemCatalogError: LocalizedError {
-    case noSuchItem, invalidListing, invalidMove, database, unsupportedVersion
+    case noSuchItem, invalidListing, invalidMove, database, unsupportedVersion, syncAnchorExpired
     var errorDescription: String? {
         switch self {
         case .noSuchItem: return "item not found"
@@ -11,6 +11,7 @@ enum ItemCatalogError: LocalizedError {
         case .invalidMove: return "invalid catalog move"
         case .database: return "CloudMount item catalog unavailable"
         case .unsupportedVersion: return "unsupported CloudMount item catalog version"
+        case .syncAnchorExpired: return "sync anchor expired"
         }
     }
 }
@@ -27,9 +28,11 @@ final class ItemCatalog {
 
     private var database: OpaquePointer?
     private let lock = NSLock()
+    private let journalLimit: Int
     private static let columns = "identifier,parent,path,filename,is_directory,size,mtime,backend_id,content_version,metadata_version"
 
-    init(fileURL: URL) throws {
+    init(fileURL: URL, journalLimit: Int = 20_000) throws {
+        self.journalLimit = max(1, journalLimit)
         let directory = fileURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
@@ -66,9 +69,10 @@ final class ItemCatalog {
                         """)
                     _ = try query("CREATE INDEX items_parent ON items(domain,parent)")
                     _ = try query("PRAGMA user_version=1")
-                case 1: break
+                case 1, 2: break
                 default: throw ItemCatalogError.unsupportedVersion
                 }
+                if version < 2 { try migrateSyncState() }
                 // Prepare all persisted fields and validate referential integrity before serving DATA.
                 _ = try query("SELECT domain,binding FROM domains LIMIT 0")
                 _ = try query("SELECT domain,\(Self.columns),created,last_seen FROM items LIMIT 0")
@@ -84,6 +88,9 @@ final class ItemCatalog {
                 guard uniqueColumns.contains("domain,identifier"), uniqueColumns.contains("domain,path"),
                       cascades == ["domain->domains.domain", "domain->items.domain", "parent->items.identifier"] else { throw ItemCatalogError.database }
                 guard try query("PRAGMA foreign_key_check").isEmpty else { throw ItemCatalogError.database }
+                _ = try query("SELECT domain,epoch,revision,floor FROM domains LIMIT 0")
+                _ = try query("SELECT domain,identifier,last_scan FROM directory_state LIMIT 0")
+                _ = try query("SELECT domain,sequence,parent,identifier,metadata FROM changes LIMIT 0")
             }
         } catch { sqlite3_close(database); database = nil; throw error }
     }
@@ -104,7 +111,7 @@ final class ItemCatalog {
             let existing = try query("SELECT binding FROM domains WHERE domain=?", [domain]).first?.first
             if existing == binding { return false }
             _ = try query("DELETE FROM domains WHERE domain=?", [domain])
-            _ = try query("INSERT INTO domains(domain,binding) VALUES (?,?)", [domain, binding])
+            _ = try query("INSERT INTO domains(domain,binding,epoch) VALUES (?,?,?)", [domain, binding, UUID().uuidString.lowercased()])
             return true
         } }
     }
@@ -128,14 +135,33 @@ final class ItemCatalog {
                       paths.insert(Data(entry.path.utf8)).inserted else { throw ItemCatalogError.invalidListing }
             }
             let children = try query("SELECT \(Self.columns) FROM items WHERE domain=? AND parent IS ?", [domain, Self.storedParent(parentIdentifier)]).map(decode)
+            let authoritative = try !query("SELECT identifier FROM directory_state WHERE domain=? AND identifier=?", [domain, parentIdentifier]).isEmpty
+            var baselineChanged = false
             // Match SQLite's binary path keys, not Swift's Unicode canonical equivalence.
             for child in children where !entries.contains(where: { $0.path.utf8.elementsEqual(child.path.utf8) && $0.isDirectory == child.metadata.isDirectory }) {
+                let retired = try query("""
+                    WITH RECURSIVE subtree(identifier) AS (
+                      SELECT identifier FROM items WHERE domain=? AND identifier=?
+                      UNION ALL SELECT i.identifier FROM items i JOIN subtree s ON i.parent=s.identifier WHERE i.domain=?)
+                    SELECT \(Self.columns) FROM items WHERE domain=? AND identifier IN subtree
+                    """, [domain, child.identifier, domain, domain]).map(decode)
+                if authoritative { for record in retired { try appendChange(domain: domain, parent: record.parentIdentifier, identifier: record.identifier, metadata: nil) } }
+                else { baselineChanged = true }
                 _ = try query("DELETE FROM items WHERE domain=? AND identifier=?", [domain, child.identifier])
             }
-            return try entries.map { entry in
-                let old = try query("SELECT identifier FROM items WHERE domain=? AND path=?", [domain, entry.path]).first?.first.flatMap { $0 }
-                return try save(domain: domain, identifier: old ?? CloudMountItemIdentifier.make(), parent: parentIdentifier, entry: entry)
+            let result = try entries.map { entry in
+                let old = try query("SELECT \(Self.columns) FROM items WHERE domain=? AND path=?", [domain, entry.path]).first.map(decode)
+                let current = try save(domain: domain, identifier: old?.identifier ?? CloudMountItemIdentifier.make(), parent: parentIdentifier, entry: entry)
+                if old?.metadata.metadataVersion != current.metadataVersion {
+                    if authoritative { try appendChange(domain: domain, parent: parentIdentifier, identifier: current.itemIdentifier, metadata: current) }
+                    else { baselineChanged = true }
+                }
+                return current
             }
+            _ = try query("DELETE FROM directory_state WHERE domain=? AND identifier!=? AND identifier NOT IN (SELECT identifier FROM items WHERE domain=?)", [domain, CloudMountItemIdentifier.root, domain])
+            _ = try query("INSERT INTO directory_state(domain,identifier,last_scan) VALUES (?,?,?) ON CONFLICT(domain,identifier) DO UPDATE SET last_scan=excluded.last_scan", [domain, parentIdentifier, String(Date().timeIntervalSince1970)])
+            if baselineChanged { try advanceRevision(domain: domain) }
+            return result
         } }
     }
 
@@ -144,7 +170,9 @@ final class ItemCatalog {
             let record = try resolveUnlocked(domain: domain, identifier: identifier)
             guard record.path.utf8.elementsEqual(entry.path.utf8), record.metadata.isDirectory == entry.isDirectory,
                   entry.filename.utf8.elementsEqual(record.metadata.filename.utf8) else { throw ItemCatalogError.noSuchItem }
-            return try save(domain: domain, identifier: identifier, parent: record.parentIdentifier, entry: entry)
+            let current = try save(domain: domain, identifier: identifier, parent: record.parentIdentifier, entry: entry)
+            if current.metadataVersion != record.metadata.metadataVersion { try appendChange(domain: domain, parent: record.parentIdentifier, identifier: identifier, metadata: current) }
+            return current
         } }
     }
 
@@ -165,8 +193,126 @@ final class ItemCatalog {
                 let parent = item.identifier == identifier ? parentIdentifier : item.parentIdentifier
                 let entry = CloudMountMetadata(path: path, filename: (path as NSString).lastPathComponent, isDirectory: item.metadata.isDirectory,
                                               size: item.metadata.size, modificationTime: item.metadata.modificationTime, backendID: item.backendID, version: "")
-                _ = try save(domain: domain, identifier: item.identifier, parent: parent, entry: entry)
+                let current = try save(domain: domain, identifier: item.identifier, parent: parent, entry: entry)
+                if item.parentIdentifier != parent { try appendChange(domain: domain, parent: item.parentIdentifier, identifier: item.identifier, metadata: nil) }
+                if current.metadataVersion != item.metadata.metadataVersion { try appendChange(domain: domain, parent: parent, identifier: item.identifier, metadata: current) }
             }
+        } }
+    }
+
+    private func migrateSyncState() throws {
+        _ = try query("ALTER TABLE domains ADD COLUMN epoch TEXT NOT NULL DEFAULT ''")
+        _ = try query("ALTER TABLE domains ADD COLUMN revision INTEGER NOT NULL DEFAULT 0 CHECK(revision>=0)")
+        _ = try query("ALTER TABLE domains ADD COLUMN floor INTEGER NOT NULL DEFAULT 0 CHECK(floor>=0 AND floor<=revision)")
+        for row in try query("SELECT domain FROM domains") {
+            _ = try query("UPDATE domains SET epoch=? WHERE domain=?", [UUID().uuidString.lowercased(), row[0]])
+        }
+        _ = try query("""
+            CREATE TABLE directory_state (
+                domain TEXT NOT NULL, identifier TEXT NOT NULL, last_scan REAL NOT NULL,
+                PRIMARY KEY(domain,identifier), FOREIGN KEY(domain) REFERENCES domains(domain) ON DELETE CASCADE)
+            """)
+        _ = try query("INSERT INTO directory_state SELECT DISTINCT domain,COALESCE(parent,?),0 FROM items", [CloudMountItemIdentifier.root])
+        _ = try query("""
+            CREATE TABLE changes (
+                domain TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence>0),
+                parent TEXT NOT NULL, identifier TEXT NOT NULL, metadata TEXT,
+                PRIMARY KEY(domain,sequence), FOREIGN KEY(domain) REFERENCES domains(domain) ON DELETE CASCADE)
+            """)
+        _ = try query("CREATE INDEX changes_parent ON changes(domain,parent,sequence)")
+        _ = try query("PRAGMA user_version=2")
+    }
+
+    func revision(domain: String) throws -> Int64 {
+        try locked { try anchorUnlocked(domain: domain).sequence }
+    }
+
+    func currentAnchor(domain: String) throws -> Data {
+        try locked { try anchorUnlocked(domain: domain).data }
+    }
+
+    func authoritativeDirectories(domain: String) throws -> [String] {
+        try locked { try query("SELECT identifier FROM directory_state WHERE domain=? ORDER BY identifier", [domain]).compactMap { $0[0] } }
+    }
+
+    private func anchorUnlocked(domain: String) throws -> CloudMountSyncAnchor {
+        guard let row = try query("SELECT epoch,revision FROM domains WHERE domain=?", [domain]).first,
+              let epoch = row[0].flatMap(UUID.init(uuidString:)), let sequence = row[1].flatMap(Int64.init), sequence >= 0 else { throw ItemCatalogError.noSuchItem }
+        return CloudMountSyncAnchor(epoch: epoch, sequence: sequence)
+    }
+
+    @discardableResult private func advanceRevision(domain: String) throws -> Int64 {
+        let current = try anchorUnlocked(domain: domain).sequence
+        guard current < Int64.max else { throw ItemCatalogError.database }
+        _ = try query("UPDATE domains SET revision=revision+1 WHERE domain=?", [domain])
+        return current + 1
+    }
+
+    private func appendChange(domain: String, parent: String, identifier: String, metadata: CloudMountItemMetadata?) throws {
+        let sequence = try advanceRevision(domain: domain)
+        let payload = try metadata.map { String(decoding: try JSONEncoder().encode($0), as: UTF8.self) }
+        _ = try query("INSERT INTO changes(domain,sequence,parent,identifier,metadata) VALUES (?,?,?,?,?)", [domain, String(sequence), parent, identifier, payload])
+        if let removed = try query("SELECT sequence FROM changes WHERE domain=? ORDER BY sequence DESC LIMIT 1 OFFSET ?", [domain, String(journalLimit)]).first?[0] {
+            _ = try query("UPDATE domains SET floor=MAX(floor,?) WHERE domain=?", [removed, domain])
+            _ = try query("DELETE FROM changes WHERE domain=? AND sequence<=?", [domain, removed])
+        }
+    }
+
+    func changes(domain: String, container: String, from data: Data, limit: Int) throws -> CloudMountChangeResponse {
+        try locked { try transaction {
+            let head = try anchorUnlocked(domain: domain)
+            guard let from = CloudMountSyncAnchor.decode(data), from.epoch == head.epoch,
+                  from.sequence <= head.sequence,
+                  let floor = try query("SELECT floor FROM domains WHERE domain=?", [domain]).first?[0].flatMap(Int64.init),
+                  from.sequence >= floor else { throw ItemCatalogError.syncAnchorExpired }
+            let bound = min(200, max(1, limit))
+            var filter = ""; var parameters: [String?] = [domain, String(from.sequence)]
+            if container != CloudMountItemIdentifier.workingSet {
+                if container == CloudMountItemIdentifier.root { filter = " AND parent=?" }
+                else {
+                    guard CloudMountItemIdentifier.isValid(container) else { throw ItemCatalogError.noSuchItem }
+                    let kind = try query("SELECT is_directory FROM items WHERE domain=? AND identifier=?", [domain, container]).first?[0]
+                    let deletedDirectory = try !query("SELECT sequence FROM changes WHERE domain=? AND parent=? LIMIT 1", [domain, container]).isEmpty
+                    filter = kind == "1" || deletedDirectory ? " AND parent=?" : " AND identifier=?"
+                }
+                parameters.append(container)
+            }
+            parameters.append(String(bound + 1))
+            let rows = try query("SELECT sequence,identifier,metadata FROM changes WHERE domain=? AND sequence>?\(filter) ORDER BY sequence LIMIT ?", parameters)
+            let more = rows.count > bound
+            let consumed = Array(rows.prefix(bound))
+            var updates: [String: CloudMountItemMetadata] = [:]; var deleted = Set<String>()
+            for row in consumed {
+                guard let identifier = row[1], CloudMountItemIdentifier.isValid(identifier) else { throw ItemCatalogError.database }
+                if let payload = row[2] {
+                    let item = try JSONDecoder().decode(CloudMountItemMetadata.self, from: Data(payload.utf8))
+                    guard item.itemIdentifier == identifier else { throw ItemCatalogError.database }
+                    updates[identifier] = item; deleted.remove(identifier)
+                } else { updates.removeValue(forKey: identifier); deleted.insert(identifier) }
+            }
+            let sequence = more ? consumed.last![0].flatMap(Int64.init)! : head.sequence
+            return CloudMountChangeResponse(items: updates.values.sorted { $0.itemIdentifier < $1.itemIdentifier }, deleted: deleted.sorted(),
+                anchor: CloudMountSyncAnchor(epoch: head.epoch, sequence: sequence).data, moreComing: more, nextPage: nil)
+        } }
+    }
+
+    func workingSet(domain: String, page: Data?, limit: Int) throws -> CloudMountChangeResponse {
+        try locked { try transaction {
+            let head = try anchorUnlocked(domain: domain)
+            var offset = 0
+            if let page {
+                guard page.count < 500, let text = String(data: page, encoding: .utf8) else { throw ItemCatalogError.syncAnchorExpired }
+                let parts = text.split(separator: ":", omittingEmptySubsequences: false)
+                guard parts.count == 3, parts[0] == "w2", let anchor = Data(base64Encoded: String(parts[1])), anchor == head.data,
+                      let value = Int(parts[2]), value >= 0, String(value) == parts[2],
+                      "w2:\(head.data.base64EncodedString()):\(value)" == text else { throw ItemCatalogError.syncAnchorExpired }
+                offset = value
+            }
+            let bound = min(200, max(1, limit))
+            let records = try query("SELECT \(Self.columns) FROM items WHERE domain=? ORDER BY identifier LIMIT ? OFFSET ?", [domain, String(bound + 1), String(offset)]).map(decode)
+            let more = records.count > bound
+            return CloudMountChangeResponse(items: records.prefix(bound).map(\.metadata), deleted: [], anchor: head.data, moreComing: false,
+                nextPage: more ? Data("w2:\(head.data.base64EncodedString()):\(offset + bound)".utf8) : nil)
         } }
     }
 

@@ -40,11 +40,35 @@ struct CloudMountBridgeResponse: Codable {
 
 enum CloudMountItemIdentifier {
     static let root = "NSFileProviderRootContainerItemIdentifier"
+    static let workingSet = "NSFileProviderWorkingSetContainerItemIdentifier"
     static func make() -> String { "i-" + UUID().uuidString.lowercased() }
     static func isValid(_ value: String) -> Bool {
         guard value.hasPrefix("i-"), let uuid = UUID(uuidString: String(value.dropFirst(2))) else { return false }
         return value == "i-" + uuid.uuidString.lowercased()
     }
+}
+
+/// A catalog epoch scopes durable sequences; it is not a backend delta token.
+struct CloudMountSyncAnchor {
+    let epoch: UUID
+    let sequence: Int64
+    var data: Data { Data("2:\(epoch.uuidString.lowercased()):\(sequence)".utf8) }
+    static func decode(_ data: Data) -> CloudMountSyncAnchor? {
+        guard data.count < 500, let text = String(data: data, encoding: .utf8) else { return nil }
+        let parts = text.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0] == "2", let epoch = UUID(uuidString: String(parts[1])),
+              let sequence = Int64(parts[2]), sequence >= 0 else { return nil }
+        let value = CloudMountSyncAnchor(epoch: epoch, sequence: sequence)
+        return value.data == data ? value : nil
+    }
+}
+
+struct CloudMountChangeResponse: Codable {
+    let items: [CloudMountItemMetadata]
+    let deleted: [String]
+    let anchor: Data
+    let moreComing: Bool
+    let nextPage: Data?
 }
 
 enum CloudMountDomainIdentifier {
