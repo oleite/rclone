@@ -61,6 +61,7 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
     private static func error(_ error: Error) -> Error {
         let value = error as NSError
         if value.domain == "org.rclone.cloudmount", value.code == -1002 { return NSFileProviderError(.syncAnchorExpired) }
+        if value.domain == "org.rclone.cloudmount", value.code == 404 { return NSFileProviderError(.noSuchItem) }
         if value.domain == NSFileProviderErrorDomain { return error }
         return NSFileProviderError(.serverUnreachable)
     }

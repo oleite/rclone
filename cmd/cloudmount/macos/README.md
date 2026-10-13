@@ -62,8 +62,8 @@ receives or stores backend-relative paths or the rclone remote selector.
 
 The LaunchAgent persists its versioned mapping in
 `~/Library/Application Support/Rclone CloudMount/domains.json`. The directory is
-mode `0700`, the file is mode `0600`, and updates are atomic. JSON and SQLite v1
-already support arbitrary independent domains; no schema reset/migration is needed.
+mode `0700`, the file is mode `0600`, and updates are atomic. JSON remains v1;
+SQLite v2 transactionally migrates v1 bindings/items without resetting their UUIDs.
 Display names/registered IDs remain authoritative in NSFileProviderManager.
 Removing a domain removes the File Provider domain first and its Agent mapping
 second, without changing another domain. Failed/uncertain registration retains
@@ -77,7 +77,8 @@ replacing an inode another process may have opened.
 
 The Agent exposes two mutually authenticated Mach services in the same process.
 The containing app alone can use the control service for ping and domain mapping;
-the File Provider alone can use the data service for List, Stat, and Fetch. Each
+the File Provider alone can use the data service for List, Stat, Fetch and durable
+change enumeration. Each
 listener enforces the exact same-team client identifier for its role and the
 Agent's effective user. Clients enforce the Agent's Apple anchor/team/identifier.
 
@@ -142,7 +143,7 @@ UUID. DATA List accepts a parent ID; Stat and Fetch accept an item ID. Only the
 Agent resolves IDs to backend paths before calling the existing Go bridge.
 Malformed, unknown, legacy path-derived and cross-domain IDs fail as `noSuchItem`.
 
-Schema version 1 initializes a fresh empty database transactionally. A newer,
+Schema version 2 initializes a fresh database or migrates version 1 transactionally. A newer,
 corrupt or structurally invalid catalog fails closed; it is not silently reset.
 The catalog stores relative paths, metadata, stable parent IDs, optional backend
 IDs, separate versions and created/last-seen timestamps—not selectors, credentials
@@ -175,10 +176,48 @@ remove the old domain using its existing ID, update the app, and then use
 `domain-add <display-name> <remote:path>` with the new app. Old IDs are never reinterpreted as
 paths, and CloudMount never modifies Apple's private File Provider database.
 
-`enumerateChanges` remains a limited no-op with a constant anchor; signaling an
-enumerator is not remote-change synchronization. A direct provider enumeration
-reconciles the catalog, but cached Finder namespaces may require domain recreation
-to discover external changes in this development phase. No polling/journal is added.
+## Persistent remote changes
+
+The Agent owns a durable domain-wide revision, random binding epoch, bounded
+journal and authoritative-directory snapshot table. A complete first listing
+establishes a baseline; subsequent List/Stat transitions append updates and
+subtree tombstones in the same SQLite transaction. No-op scans do not advance
+revision. Directory existence alone does not mean its children were enumerated.
+Migration restores observed parents evidenced by v1 child rows; previously empty
+v1 directories become authoritative on their next enumeration.
+
+An opaque anchor encodes only version, epoch and revision. Malformed, wrong-domain,
+retired-epoch, future or pruned anchors report `syncAnchorExpired`; retained history
+is never silently skipped. The journal retains 20,000 rows per domain. DATA change
+pages are capped at 200 rows, with container filtering and final-state coalescing.
+Cached Working Set initial pages also expire if the namespace changes mid-page.
+
+Each domain has an independent Agent coordinator and Go-owned cancellable watch.
+`fs.Features.ChangeNotify` is a hint, not the authority: OneDrive starts at a latest
+in-memory Graph token and deletion notifications can be incomplete. Crypt handles
+its own path decryption. Startup and periodic authoritative rescans recover missed
+events, including Agent downtime, using only complete observed directory snapshots.
+Unopened subtrees are not recursively crawled. Failed listings retain the old
+snapshot and retry with bounded backoff; queue overflow requests a safe rescan.
+Removal/remapping stops the old watcher and existing generation/discovery gates
+reject stale completions.
+
+Production defaults are a 60-second hint interval, 300-second safety interval and
+one-second debounce. Narrow build settings `CLOUDMOUNT_SYNC_HINT_INTERVAL` and
+`CLOUDMOUNT_SYNC_SAFETY_INTERVAL` may inject shorter acceptance intervals without
+altering these defaults. Embedded backend diagnostic strings/attributes are withheld
+because they can contain paths, selectors or tokens; severity and sanitized Agent
+outcomes remain available.
+
+After durable commit, the embedded Agent uses Apple's related-executable
+`NSFileProviderManager` support to signal `.workingSet`. Replicated providers ignore
+directory-specific signals. The working set is the observed catalog namespace;
+it is not a recursive whole-drive listing. Real `currentSyncAnchor` and
+`enumerateChanges` callbacks feed updates/deletions to fileproviderd. Catalog detection,
+signal acceptance, system ingestion and content rehydration are asynchronous, not
+one atomic user-visible event. See [Apple's replicated-provider sample](https://developer.apple.com/documentation/fileprovider/synchronizing-files-using-file-provider-extensions)
+and the installed `NSFileProviderManager.h` / `NSFileProviderReplicatedExtension.h` contracts.
+
 Live rclone configuration retargeting of a mounted domain is unsupported: remove
 and reconfigure the domain before changing its backing configuration. Selector
 binding is not a fingerprint of the underlying account/backend instance.
