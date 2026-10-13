@@ -69,6 +69,11 @@ Removing a domain removes the File Provider domain first and its Agent mapping
 second, without changing another domain. Failed/uncertain registration retains
 mapping until a live registration can be removed safely; retry cleanup using the
 printed ID. Existing owned-namespace IDs can also be removed with the general command.
+Add/remove operations hold a per-domain, process-shared lifecycle lock through
+inspection and rollback. A competing operation on that ID fails with retry
+guidance; unrelated domains remain independent. Empty private lock files are
+retained in `Application Support/Rclone CloudMount/lifecycle-locks` to avoid
+replacing an inode another process may have opened.
 
 The Agent exposes two mutually authenticated Mach services in the same process.
 The containing app alone can use the control service for ping and domain mapping;
